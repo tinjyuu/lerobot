@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "so101-follower": {
+      "command": "python",
+      "args": ["/Users/sy/dev/lerobot/mcp_so101_server.py"],
+      "env": {
+        "PYTHONPATH": "/Users/sy/dev/lerobot/src"
+      }
+    }
+  }
+}
