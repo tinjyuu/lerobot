@@ -8,8 +8,8 @@
 - MCP サーバーモードに加え、サーバーを立てずに直接 Python 実行でも同等機能を呼び出し可能
 
 ### 実行モード
-- MCP サーバーモード: STDIO トランスポートで MCP クライアントからツール/リソースを呼び出す
-- 直接 Python モード: Python スクリプト/REPL から LeRobot API を直接呼び出す（MCP を経由しない）
+- MCP サーバーモード（プロセス直起動）: サーバーは「単なる Python スクリプト」です。クライアントがこのスクリプトをプロセスとして起動し、STDIO トランスポートで `list_tools`/`call_tool`/`read_resource` を実行します（常駐デーモン不要）。
+- 直接 Python モード: MCP を経由せず、Python スクリプト/REPL から LeRobot API を直接呼び出す（同等の操作を自前で行う）。
 
 ### コンポーネント構成（アーキテクチャ）
 
@@ -94,6 +94,7 @@ sequenceDiagram
 ```
 
 ### MCP サーバーモード
+- サーバーは Python スクリプト（`mcp/mcp_so101_server.py`）。クライアントがプロセスを起動し、STDIO で対話します（ネットワークサーバーや常駐は不要）。
 - STDIO トランスポートで起動し、クライアントは `list_tools` / `call_tool` / `list_resources` / `read_resource` を使用
 - 参考: [MCP Introduction](https://modelcontextprotocol.io/docs/getting-started/intro)
 
