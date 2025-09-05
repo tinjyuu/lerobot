@@ -1,7 +1,4 @@
 ---
-description:
-globs:
-alwaysApply: true
+alwaysApply: false
 ---
-
 conda activate lerobotを使ってください。
