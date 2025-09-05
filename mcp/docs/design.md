@@ -20,13 +20,13 @@ graph TD
     P["Direct Python Script / REPL"]
   end
 
-  subgraph Server Side (this repo)
-    S["MCP Server: so101-follower-mcp\n(list_tools/resources/prompts, call_tool, read_resource)"]
-    T["Tools: connect_robot / disconnect_robot /\n get_robot_status / control_gripper /\n open_gripper / close_gripper / move_joint / move_all_joints"]
-    R["Resources: so101://robot/status, so101://robot/config,\n so101://camera/front (planned)"]
+  subgraph Server Side
+    S["MCP Server: so101-follower-mcp<br/>(list_tools/resources/prompts, call_tool, read_resource)"]
+    T["Tools: connect_robot / disconnect_robot /<br/>get_robot_status / control_gripper /<br/>open_gripper / close_gripper / move_joint / move_all_joints"]
+    R["Resources: so101://robot/status, so101://robot/config,<br/>so101://camera/front (planned)"]
   end
 
-  subgraph Drivers & HW
+  subgraph Drivers and HW
     L["LeRobot SDK (SO101Follower)"]
     C["Camera Capture (OpenCV/RealSense)"]
     H["SO101 Follower Arm Hardware"]
