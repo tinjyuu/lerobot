@@ -5,7 +5,7 @@
 
 # Set the project directory
 PROJECT_DIR="/Users/sy/dev/lerobot"
-SERVER_SCRIPT="$PROJECT_DIR/mcp_so101_server.py"
+SERVER_SCRIPT="$PROJECT_DIR/mcp/mcp_so101_server.py"
 
 # Check if the server script exists
 if [ ! -f "$SERVER_SCRIPT" ]; then
@@ -13,7 +13,12 @@ if [ ! -f "$SERVER_SCRIPT" ]; then
     exit 1
 fi
 
-# Set Python path to include the src directory
+# Activate conda env and set Python path to include the src directory
+if command -v conda >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    source "$(conda info --base)/etc/profile.d/conda.sh"
+    conda activate lerobot || true
+fi
 export PYTHONPATH="$PROJECT_DIR/src:$PYTHONPATH"
 
 # Change to project directory
