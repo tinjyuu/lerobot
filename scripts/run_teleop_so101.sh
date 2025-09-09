@@ -12,4 +12,5 @@ TELEOP_ID=${TELEOP_ID:-my_awesome_leader_arm}
   --robot.id="$ROBOT_ID" \
   --teleop.type=so101_leader \
   --teleop.port="$TELEOP_PORT" \
-  --teleop.id="$TELEOP_ID"
+  --teleop.id="$TELEOP_ID" \
+  --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 1920, height: 1080, fps: 30}}" 
