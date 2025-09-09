@@ -4,7 +4,7 @@
 ROBOT_PORT=${ROBOT_PORT:-/dev/tty.usbmodem5A7A0178011}
 ROBOT_ID=${ROBOT_ID:-my_awesome_follower_arm}
 HF_USER=${HF_USER:-tinjyuu}
-DATASET_REPO_ID=${DATASET_REPO_ID:-${HF_USER}/eval_so101-9}
+DATASET_REPO_ID=${DATASET_REPO_ID:-${HF_USER}/eval_so101-12}
 SINGLE_TASK=${SINGLE_TASK:-"Put lego brick into the transparent box"}
 
 # Camera defaults (SO101 front camera)
@@ -29,6 +29,6 @@ python -m lerobot.record \
   --robot.cameras="{ overhead: {type: opencv, index_or_path: 0, width: 1920, height: 1080, fps: 30}, side: {type: opencv, index_or_path: 1, width: 1920, height: 1080, fps: 30}}" \
   --dataset.repo_id="$DATASET_REPO_ID" \
   --dataset.single_task="$SINGLE_TASK" \
-  --policy.path="boshenz/act_so101_grabcube"
+  --policy.path="tinjyuu/my-lerobot-policy-5"
 
 
