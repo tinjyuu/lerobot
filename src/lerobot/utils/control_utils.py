@@ -137,7 +137,7 @@ def predict_action(
 
 def init_keyboard_listener():
     # Allow to exit early while recording an episode or resetting the environment,
-    # by tapping the right arrow key '->'. This might require a sudo permission
+    # by tapping F6 (next) or F5 (rerecord last). This might require a sudo permission
     # to allow your terminal to monitor keyboard events.
     events = {}
     events["exit_early"] = False
@@ -156,11 +156,11 @@ def init_keyboard_listener():
 
     def on_press(key):
         try:
-            if key == keyboard.Key.right:
-                print("Right arrow key pressed. Exiting loop...")
+            if key == keyboard.Key.f6:
+                print("F6 pressed. Exiting loop...")
                 events["exit_early"] = True
-            elif key == keyboard.Key.left:
-                print("Left arrow key pressed. Exiting loop and rerecord the last episode...")
+            elif key == keyboard.Key.f5:
+                print("F5 pressed. Exiting loop and rerecord the last episode...")
                 events["rerecord_episode"] = True
                 events["exit_early"] = True
             elif key == keyboard.Key.esc:
