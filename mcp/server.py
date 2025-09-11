@@ -2,6 +2,8 @@ import atexit
 import os
 import signal
 import sys
+import threading
+import time
 
 from fastmcp import FastMCP
 
@@ -14,11 +16,25 @@ except ModuleNotFoundError:
     sys.path.insert(0, str(_Path(__file__).parent.parent / "src"))
     from lerobot.robots.so101_follower import SO101Follower, SO101FollowerConfig
 
+# Heavy imports at module scope to avoid latency on first tool call
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.datasets.utils import build_dataset_frame, dataset_to_policy_features, hw_to_dataset_features
+from lerobot.policies.factory import get_policy_class
+from lerobot.utils.control_utils import predict_action
+from lerobot.utils.robot_utils import busy_wait
+from lerobot.utils.utils import get_safe_torch_device, init_logging
+
 mcp = FastMCP("so101")
 
 # Default port for SO101 follower (overridable via env)
 DEFAULT_SO101_PORT = os.getenv("LEROBOT_SO101_PORT", "/dev/tty.usbmodem5A7A0178011")
 DEFAULT_SO101_ID = os.getenv("LEROBOT_SO101_ID", "my_awesome_follower_arm")
+DEFAULT_POLICY_PATH = os.getenv("LEROBOT_POLICY_PATH", "tinjyuu/my_smolvla-lerobot-policy-1")
+DEFAULT_FPS = int(os.getenv("LEROBOT_POLICY_FPS", "30"))
+DEFAULT_SINGLE_TASK = os.getenv("LEROBOT_SINGLE_TASK", "Clean up the desk")
+DEFAULT_MCP_TRANSPORT = os.getenv("LEROBOT_MCP_TRANSPORT")  # e.g. "streamable-http"
+DEFAULT_MCP_HOST = os.getenv("LEROBOT_MCP_HOST", "127.0.0.1")
+DEFAULT_MCP_PORT = int(os.getenv("LEROBOT_MCP_PORT", "8000"))
 
 # Supported joints for SO101 follower arm
 SO101_JOINTS = [
@@ -32,6 +48,8 @@ SO101_JOINTS = [
 
 # Global robot instance
 robot = None
+policy_thread = None
+policy_stop_event = None
 
 
 def _ensure_connected() -> tuple[bool, str]:
@@ -55,6 +73,87 @@ def _ensure_connected() -> tuple[bool, str]:
         return True, f"SO101 follower connected on port {DEFAULT_SO101_PORT}"
     except Exception as e:
         return False, str(e)
+
+
+def _start_policy_thread(policy_path: str, single_task: str, fps: int) -> tuple[bool, str]:
+    """Start a background thread that runs the policy control loop."""
+    global policy_thread, policy_stop_event
+
+    # If already running, do not start another
+    if policy_thread is not None and policy_thread.is_alive():
+        return False, "Policy loop already running."
+
+    ok, msg = _ensure_connected()
+    if not ok:
+        return False, f"Failed to connect robot: {msg}"
+
+    policy_stop_event = threading.Event()
+
+    def _loop():
+        try:
+            init_logging()
+            # Derive features from robot IO (no dataset metadata)
+            obs_ds_features = hw_to_dataset_features(
+                robot.observation_features, prefix="observation", use_video=True
+            )
+            act_ds_features = hw_to_dataset_features(robot.action_features, prefix="action", use_video=False)
+            combined_ds_features = {**obs_ds_features, **act_ds_features}
+
+            # Configure policy features and load pretrained policy
+            policy_cfg = PreTrainedConfig.from_pretrained(policy_path)
+            policy_features = dataset_to_policy_features(combined_ds_features)
+            policy_cfg.output_features = {k: v for k, v in policy_features.items() if k.startswith("action")}
+            policy_cfg.input_features = {
+                k: v for k, v in policy_features.items() if not k.startswith("action")
+            }
+
+            policy_cls = get_policy_class(policy_cfg.type)
+            policy = policy_cls.from_pretrained(policy_path, config=policy_cfg)
+
+            # Run control loop
+            while not policy_stop_event.is_set():
+                loop_start = time.perf_counter()
+
+                obs = robot.get_observation()
+                obs_frame = build_dataset_frame(obs_ds_features, obs, prefix="observation")
+
+                action_values = predict_action(
+                    obs_frame,
+                    policy,
+                    get_safe_torch_device(policy.config.device),
+                    policy.config.use_amp,
+                    task=single_task,
+                    robot_type=robot.robot_type,
+                )
+                action = {key: action_values[i].item() for i, key in enumerate(robot.action_features)}
+                robot.send_action(action)
+
+                dt_s = time.perf_counter() - loop_start
+                busy_wait(max(0.0, 1 / max(1, fps) - dt_s))
+        except Exception:
+            # Swallow exceptions so the server keeps running; real clients can query logs
+            pass
+
+    policy_thread = threading.Thread(target=_loop, name="policy_loop", daemon=True)
+    policy_thread.start()
+    return True, f"Policy loop started (task='{single_task}', fps={fps})."
+
+
+def _stop_policy_thread() -> tuple[bool, str]:
+    """Stop the background policy thread if running."""
+    global policy_thread, policy_stop_event
+    if policy_thread is None or not policy_thread.is_alive():
+        return False, "No running policy loop."
+    if policy_stop_event is not None:
+        policy_stop_event.set()
+    try:
+        policy_thread.join(timeout=2.0)
+    except Exception:
+        pass
+    finally:
+        policy_thread = None
+        policy_stop_event = None
+    return True, "Policy loop stopped."
 
 
 @mcp.tool
@@ -300,6 +399,32 @@ def set_wrist_roll(position: float) -> str:
     return move_joint("wrist_roll", position)
 
 
+# =========================
+# Policy control MCP tools
+# =========================
+
+
+@mcp.tool
+def run_clean_up_the_desk_policy(
+    policy_path: str = DEFAULT_POLICY_PATH,
+    fps: int = DEFAULT_FPS,
+) -> str:
+    """Run the "Clean up the desk" policy in the background.
+
+    Uses robot IO to derive policy features (no dataset metadata).
+    Call stop_running_policy() to stop.
+    """
+    ok, msg = _start_policy_thread(policy_path, DEFAULT_SINGLE_TASK, int(fps))
+    return msg if ok else f"Failed to start policy: {msg}"
+
+
+@mcp.tool
+def stop_running_policy() -> str:
+    """Stop the background policy loop if running."""
+    ok, msg = _stop_policy_thread()
+    return msg if ok else msg
+
+
 if __name__ == "__main__":
 
     def _cleanup(*_args):
@@ -341,6 +466,17 @@ if __name__ == "__main__":
     _connect_on_startup()
 
     try:
-        mcp.run()
+        run_kwargs = {}
+        if DEFAULT_MCP_TRANSPORT:
+            if "http" in DEFAULT_MCP_TRANSPORT:
+                run_kwargs = {
+                    "transport": DEFAULT_MCP_TRANSPORT,
+                    "host": DEFAULT_MCP_HOST,
+                    "port": DEFAULT_MCP_PORT,
+                }
+            else:
+                run_kwargs = {"transport": DEFAULT_MCP_TRANSPORT}
+
+        mcp.run(**run_kwargs)
     finally:
         _cleanup()
