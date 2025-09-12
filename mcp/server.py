@@ -1,6 +1,4 @@
 import atexit
-import base64
-import json
 import os
 import signal
 import sys
@@ -67,6 +65,26 @@ SO101_JOINTS = [
 robot = None
 policy_thread = None
 policy_stop_event = None
+cached_policy = None
+cached_obs_ds_features = None
+cached_action_features = None
+
+
+def _get_cameras_cfg() -> dict:
+    return {
+        "overhead": OpenCVCameraConfig(
+            index_or_path=OVERHEAD_CAM_INDEX,
+            fps=OVERHEAD_CAM_FPS,
+            width=OVERHEAD_CAM_WIDTH,
+            height=OVERHEAD_CAM_HEIGHT,
+        ),
+        "front": OpenCVCameraConfig(
+            index_or_path=FRONT_CAM_INDEX,
+            fps=FRONT_CAM_FPS,
+            width=FRONT_CAM_WIDTH,
+            height=FRONT_CAM_HEIGHT,
+        ),
+    }
 
 
 def _ensure_connected() -> tuple[bool, str]:
@@ -84,26 +102,43 @@ def _ensure_connected() -> tuple[bool, str]:
             robot.connect(calibrate=False)
             return True, "SO101 follower connected."
 
-        cameras_cfg = {
-            "overhead": OpenCVCameraConfig(
-                index_or_path=OVERHEAD_CAM_INDEX,
-                fps=OVERHEAD_CAM_FPS,
-                width=OVERHEAD_CAM_WIDTH,
-                height=OVERHEAD_CAM_HEIGHT,
-            ),
-            "front": OpenCVCameraConfig(
-                index_or_path=FRONT_CAM_INDEX,
-                fps=FRONT_CAM_FPS,
-                width=FRONT_CAM_WIDTH,
-                height=FRONT_CAM_HEIGHT,
-            ),
-        }
+        cameras_cfg = _get_cameras_cfg()
         config = SO101FollowerConfig(port=DEFAULT_SO101_PORT, id=DEFAULT_SO101_ID, cameras=cameras_cfg)
         robot = SO101Follower(config)
         robot.connect(calibrate=False)
         return True, f"SO101 follower connected on port {DEFAULT_SO101_PORT}"
     except Exception as e:
         return False, str(e)
+
+
+def _preload_policy(policy_path: str) -> tuple[bool, str]:
+    """Preload and cache the policy and feature mapping to reduce first-call latency."""
+    global cached_policy, cached_obs_ds_features, cached_action_features
+    try:
+        # Build features from a non-connected robot instance (uses config only)
+        tmp_robot_cfg = SO101FollowerConfig(
+            port=DEFAULT_SO101_PORT, id=DEFAULT_SO101_ID, cameras=_get_cameras_cfg()
+        )
+        tmp_robot = SO101Follower(tmp_robot_cfg)
+
+        obs_ds_features = hw_to_dataset_features(
+            tmp_robot.observation_features, prefix="observation", use_video=True
+        )
+        act_ds_features = hw_to_dataset_features(tmp_robot.action_features, prefix="action", use_video=False)
+        combined_ds_features = {**obs_ds_features, **act_ds_features}
+
+        policy_cfg = PreTrainedConfig.from_pretrained(policy_path)
+        policy_features = dataset_to_policy_features(combined_ds_features)
+        policy_cfg.output_features = {k: v for k, v in policy_features.items() if k.startswith("action")}
+        policy_cfg.input_features = {k: v for k, v in policy_features.items() if not k.startswith("action")}
+
+        policy_cls = get_policy_class(policy_cfg.type)
+        cached_policy = policy_cls.from_pretrained(policy_path, config=policy_cfg)
+        cached_obs_ds_features = obs_ds_features
+        cached_action_features = tmp_robot.action_features
+        return True, "Policy preloaded."
+    except Exception as e:
+        return False, f"Policy preload failed: {e}"
 
 
 def _start_policy_thread(policy_path: str, single_task: str, fps: int) -> tuple[bool, str]:
@@ -123,23 +158,14 @@ def _start_policy_thread(policy_path: str, single_task: str, fps: int) -> tuple[
     def _loop():
         try:
             init_logging()
-            # Derive features from robot IO (no dataset metadata)
-            obs_ds_features = hw_to_dataset_features(
-                robot.observation_features, prefix="observation", use_video=True
-            )
-            act_ds_features = hw_to_dataset_features(robot.action_features, prefix="action", use_video=False)
-            combined_ds_features = {**obs_ds_features, **act_ds_features}
-
-            # Configure policy features and load pretrained policy
-            policy_cfg = PreTrainedConfig.from_pretrained(policy_path)
-            policy_features = dataset_to_policy_features(combined_ds_features)
-            policy_cfg.output_features = {k: v for k, v in policy_features.items() if k.startswith("action")}
-            policy_cfg.input_features = {
-                k: v for k, v in policy_features.items() if not k.startswith("action")
-            }
-
-            policy_cls = get_policy_class(policy_cfg.type)
-            policy = policy_cls.from_pretrained(policy_path, config=policy_cfg)
+            # Use cached policy/features if available; build otherwise
+            global cached_policy, cached_obs_ds_features
+            if cached_policy is None or cached_obs_ds_features is None:
+                ok_pre, _msg = _preload_policy(policy_path)
+                if not ok_pre:
+                    return
+            policy = cached_policy
+            obs_ds_features = cached_obs_ds_features
 
             # Run control loop
             while not policy_stop_event.is_set():
@@ -548,6 +574,15 @@ if __name__ == "__main__":
             print(msg)
         except Exception as e:
             print(f"Auto-connect failed: {e}")
+
+        # Eager policy preload (toggle with LEROBOT_PRELOAD_POLICY)
+        try:
+            preload = os.getenv("LEROBOT_PRELOAD_POLICY", "1")
+            if preload not in ("0", "false", "False"):
+                okp, msgp = _preload_policy(DEFAULT_POLICY_PATH)
+                print(msgp)
+        except Exception as e:
+            print(f"Policy preload failed: {e}")
 
         # Ensure we cleanup on normal interpreter exit
         atexit.register(_cleanup)
