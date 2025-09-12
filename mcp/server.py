@@ -1,4 +1,6 @@
 import atexit
+import base64
+import json
 import os
 import signal
 import sys
@@ -17,6 +19,9 @@ except ModuleNotFoundError:
     from lerobot.robots.so101_follower import SO101Follower, SO101FollowerConfig
 
 # Heavy imports at module scope to avoid latency on first tool call
+import cv2
+import numpy as np
+
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.datasets.utils import build_dataset_frame, dataset_to_policy_features, hw_to_dataset_features
@@ -336,6 +341,80 @@ def get_gripper_status() -> str:
 
     except Exception as e:
         return f"Failed to get gripper status: {str(e)}"
+
+
+# =========================
+# Camera utilities MCP tools
+# =========================
+
+
+@mcp.tool
+def get_camera_images(format: str = "png", directory: str | None = None) -> dict:
+    """Capture current frames from cameras, save to disk, and return filepaths.
+
+    Args:
+        format: Image format to save ("png" or "jpg"). Defaults to "png".
+        directory: Output directory. Defaults to LEROBOT_CAM_SAVE_DIR or outputs/captured_images.
+
+    Returns:
+        Mapping of camera name -> { format, shape, path }
+    """
+    global robot
+
+    ok, msg = _ensure_connected()
+    if not ok:
+        return {"error": f"Failed to connect: {msg}"}
+
+    # Read fresh frames
+    obs = robot.get_observation()
+
+    # Resolve output directory
+    if directory is None:
+        directory = os.getenv(
+            "LEROBOT_CAM_SAVE_DIR",
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "outputs", "captured_images")),
+        )
+    os.makedirs(directory, exist_ok=True)
+
+    ext = "png" if format.lower() == "png" else "jpg"
+    encode_params = []
+    if ext == "jpg":
+        encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
+
+    images: dict[str, dict] = {}
+    ts_ms = int(time.time() * 1000)
+    for cam_name in robot.cameras.keys():
+        frame = obs.get(cam_name)
+        if frame is None:
+            continue
+        # Ensure numpy array
+        if not isinstance(frame, np.ndarray):
+            try:
+                frame = np.array(frame)
+            except Exception:
+                continue
+        # Convert RGB->BGR for correct OpenCV encoding
+        if frame.ndim == 3 and frame.shape[2] == 3:
+            bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        else:
+            bgr = frame
+
+        fname = f"{cam_name}_{ts_ms}.{ext}"
+        fpath = os.path.abspath(os.path.join(directory, fname))
+        ok_write = cv2.imwrite(fpath, bgr, encode_params)
+        if not ok_write:
+            continue
+
+        images[cam_name] = {
+            "format": ext,
+            "shape": list(frame.shape),
+            "path": fpath,
+        }
+
+    if not images:
+        return {"error": "No camera frames available"}
+
+    return {"images": images, "dir": directory}
 
 
 # =========================
