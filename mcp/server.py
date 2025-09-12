@@ -1,4 +1,5 @@
 import atexit
+import json
 import os
 import signal
 import sys
@@ -213,7 +214,7 @@ def _stop_policy_thread() -> tuple[bool, str]:
     return True, "Policy loop stopped."
 
 
-@mcp.tool
+# @mcp.tool
 def connect_so101_follower(port: str = DEFAULT_SO101_PORT, id: str = DEFAULT_SO101_ID) -> str:
     """Connect to the SO101 follower robot.
 
@@ -245,7 +246,7 @@ def connect_so101_follower(port: str = DEFAULT_SO101_PORT, id: str = DEFAULT_SO1
         return f"Failed to connect to SO101 follower: {str(e)}"
 
 
-@mcp.tool
+# @mcp.tool
 def disconnect_so101_follower() -> str:
     """Disconnect from the SO101 follower robot.
 
@@ -528,6 +529,82 @@ def set_wrist_flex(position: float) -> str:
 @mcp.tool
 def set_wrist_roll(position: float) -> str:
     return move_joint("wrist_roll", position)
+
+
+@mcp.tool
+def move_to_rest_position() -> str:
+    """Move the arm to a default rest position (no arguments).
+
+    Defaults: all body joints to 0.0 (middle of range), gripper to 50.0.
+    Override by setting env `LEROBOT_REST_POSITIONS` to a JSON object mapping
+    joint names to positions, e.g. '{"shoulder_pan": 0, "gripper": 30}'.
+    """
+    global robot
+
+    try:
+        ok, msg = _ensure_connected()
+        if not ok:
+            return f"Failed to connect: {msg}"
+
+        # Defaults (can be overridden via LEROBOT_REST_POSITIONS)
+        rest_positions = {
+            "shoulder_pan": -3.0,
+            "shoulder_lift": -98.82,
+            "elbow_flex": 92.30,
+            "wrist_flex": 74.96,
+            "wrist_roll": -1.94,
+            "gripper": 0.49,
+        }
+
+        # Optional JSON override
+        override_json = os.getenv("LEROBOT_REST_POSITIONS")
+        if override_json:
+            try:
+                override = json.loads(override_json)
+                if isinstance(override, dict):
+                    for k, v in override.items():
+                        if k in rest_positions and isinstance(v, (int, float)):
+                            rest_positions[k] = float(v)
+            except Exception:
+                pass
+
+        # Slow movement parameters (env overridable)
+        duration_s = float(os.getenv("LEROBOT_REST_DURATION_S", "3.0"))
+        steps_env = os.getenv("LEROBOT_REST_STEPS")
+        if steps_env is not None and steps_env.strip() != "":
+            try:
+                steps = max(1, int(steps_env))
+            except Exception:
+                steps = max(1, int(duration_s * 30))  # fallback ~30Hz
+        else:
+            steps = max(1, int(duration_s * 30))  # ~30Hz by default
+
+        # Current joint positions
+        obs_now = robot.get_observation()
+        joint_keys = list(robot.action_features.keys())
+        start = {k: float(obs_now.get(k, 0.0)) for k in joint_keys}
+        target = {f"{j}.pos": float(v) for j, v in rest_positions.items()}
+
+        # Interpolate linearly to target over 'steps'
+        per_step_dt = duration_s / steps if steps > 0 else 0.0
+        for t in range(1, steps + 1):
+            loop_start = time.perf_counter()
+            alpha = t / steps
+            action = {}
+            for k in joint_keys:
+                s = start[k]
+                e = target.get(k, s)
+                action[k] = s + (e - s) * alpha
+            robot.send_action(action)
+            # pacing
+            elapsed = time.perf_counter() - loop_start
+            remaining = per_step_dt - elapsed
+            if remaining > 0:
+                busy_wait(remaining)
+
+        return "Moved to rest position slowly."
+    except Exception as e:
+        return f"Failed to move to rest position: {str(e)}"
 
 
 # =========================

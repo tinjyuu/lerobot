@@ -1,10 +1,13 @@
 ## MCP サーバー概要
 
-MCP サーバー上で VLA ポリシが動作し、SO101 の制御とカメラ入力の関係を示すシンプルな図です。
+MCP サーバー、SO101 の制御、カメラ入力、そして Google ADK を用いる AI Agent（MCP Client を内包）の関係を示すシンプルな図です。
 
 ```mermaid
 flowchart LR
-    Client["MCP Client"] -->|MCP| Server["MCP Server"]
+    subgraph AIAgent["AI Agent (Google ADK)"]
+        Client["MCP Client"]
+    end
+    Client -->|MCP| Server["MCP Server"]
     Server -->|Control| SO101["SO101 Robot"]
     Server -->|Observations| Cameras["Cameras"]
 
@@ -12,7 +15,9 @@ flowchart LR
     classDef server fill:#F3E5F5,stroke:#8E24AA,stroke-width:1px,color:#4A148C
     classDef robot fill:#E8F5E9,stroke:#43A047,stroke-width:1px,color:#1B5E20
     classDef cameras fill:#FFF3E0,stroke:#FB8C00,stroke-width:1px,color:#E65100
+    classDef ai fill:#E1F5FE,stroke:#0288D1,stroke-width:1px,color:#01579B
 
+    class AIAgent ai
     class Client client
     class Server server
     class SO101 robot
