@@ -17,6 +17,7 @@ except ModuleNotFoundError:
     from lerobot.robots.so101_follower import SO101Follower, SO101FollowerConfig
 
 # Heavy imports at module scope to avoid latency on first tool call
+from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.datasets.utils import build_dataset_frame, dataset_to_policy_features, hw_to_dataset_features
 from lerobot.policies.factory import get_policy_class
@@ -35,6 +36,17 @@ DEFAULT_SINGLE_TASK = os.getenv("LEROBOT_SINGLE_TASK", "Clean up the desk")
 DEFAULT_MCP_TRANSPORT = os.getenv("LEROBOT_MCP_TRANSPORT")  # e.g. "streamable-http"
 DEFAULT_MCP_HOST = os.getenv("LEROBOT_MCP_HOST", "127.0.0.1")
 DEFAULT_MCP_PORT = int(os.getenv("LEROBOT_MCP_PORT", "8000"))
+
+# Default camera configuration (overridable via env)
+OVERHEAD_CAM_INDEX = int(os.getenv("LEROBOT_OVERHEAD_CAM_INDEX", "1"))
+OVERHEAD_CAM_WIDTH = int(os.getenv("LEROBOT_OVERHEAD_CAM_WIDTH", "1920"))
+OVERHEAD_CAM_HEIGHT = int(os.getenv("LEROBOT_OVERHEAD_CAM_HEIGHT", "1080"))
+OVERHEAD_CAM_FPS = int(os.getenv("LEROBOT_OVERHEAD_CAM_FPS", "30"))
+
+FRONT_CAM_INDEX = int(os.getenv("LEROBOT_FRONT_CAM_INDEX", "0"))
+FRONT_CAM_WIDTH = int(os.getenv("LEROBOT_FRONT_CAM_WIDTH", "1920"))
+FRONT_CAM_HEIGHT = int(os.getenv("LEROBOT_FRONT_CAM_HEIGHT", "1080"))
+FRONT_CAM_FPS = int(os.getenv("LEROBOT_FRONT_CAM_FPS", "30"))
 
 # Supported joints for SO101 follower arm
 SO101_JOINTS = [
@@ -67,7 +79,21 @@ def _ensure_connected() -> tuple[bool, str]:
             robot.connect(calibrate=False)
             return True, "SO101 follower connected."
 
-        config = SO101FollowerConfig(port=DEFAULT_SO101_PORT, id=DEFAULT_SO101_ID)
+        cameras_cfg = {
+            "overhead": OpenCVCameraConfig(
+                index_or_path=OVERHEAD_CAM_INDEX,
+                fps=OVERHEAD_CAM_FPS,
+                width=OVERHEAD_CAM_WIDTH,
+                height=OVERHEAD_CAM_HEIGHT,
+            ),
+            "front": OpenCVCameraConfig(
+                index_or_path=FRONT_CAM_INDEX,
+                fps=FRONT_CAM_FPS,
+                width=FRONT_CAM_WIDTH,
+                height=FRONT_CAM_HEIGHT,
+            ),
+        }
+        config = SO101FollowerConfig(port=DEFAULT_SO101_PORT, id=DEFAULT_SO101_ID, cameras=cameras_cfg)
         robot = SO101Follower(config)
         robot.connect(calibrate=False)
         return True, f"SO101 follower connected on port {DEFAULT_SO101_PORT}"
@@ -439,7 +465,7 @@ if __name__ == "__main__":
 
     def _connect_on_startup():
         try:
-            msg = connect_so101_follower()
+            ok, msg = _ensure_connected()
             print(msg)
         except Exception as e:
             print(f"Auto-connect failed: {e}")
@@ -466,17 +492,6 @@ if __name__ == "__main__":
     _connect_on_startup()
 
     try:
-        run_kwargs = {}
-        if DEFAULT_MCP_TRANSPORT:
-            if "http" in DEFAULT_MCP_TRANSPORT:
-                run_kwargs = {
-                    "transport": DEFAULT_MCP_TRANSPORT,
-                    "host": DEFAULT_MCP_HOST,
-                    "port": DEFAULT_MCP_PORT,
-                }
-            else:
-                run_kwargs = {"transport": DEFAULT_MCP_TRANSPORT}
-
-        mcp.run(**run_kwargs)
+        mcp.run(transport="sse")
     finally:
         _cleanup()

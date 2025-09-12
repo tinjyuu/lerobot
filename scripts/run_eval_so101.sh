@@ -16,11 +16,11 @@ TELEOP_PORT=${TELEOP_PORT:-/dev/tty.usbmodem5A7A0178081}
 TELEOP_ID=${TELEOP_ID:-my_awesome_leader_arm}
 
 # Remove existing cache folder to avoid FileExistsError
-# CACHE_DIR="$HOME/.cache/huggingface/lerobot/$DATASET_REPO_ID"
-# if [ -d "$CACHE_DIR" ]; then
-#   echo "Removing existing cache directory: $CACHE_DIR"
-#   rm -rf "$CACHE_DIR"
-# fi
+CACHE_DIR="$HOME/.cache/huggingface/lerobot/$DATASET_REPO_ID"
+if [ -d "$CACHE_DIR" ]; then
+  echo "Removing existing cache directory: $CACHE_DIR"
+  rm -rf "$CACHE_DIR"
+fi
 
 # Activate the conda environment 'lerobot'
 if command -v conda >/dev/null 2>&1; then
@@ -35,7 +35,7 @@ python -m lerobot.record \
   --robot.type=so101_follower \
   --robot.port="$ROBOT_PORT" \
   --robot.id="$ROBOT_ID" \
-  --robot.cameras='{ overhead: {type: opencv, index_or_path: 0, width: 1920, height: 1080, fps: 30}, side: {type: opencv, index_or_path: 1, width: 1920, height: 1080, fps: 30}}' \
+  --robot.cameras="{ overhead: {type: opencv, index_or_path: 1, width: 1920, height: 1080, fps: 30}, front: {type: opencv, index_or_path: 0, width: 1920, height: 1080, fps: 30}}" \
   --dataset.repo_id="$DATASET_REPO_ID" \
   --dataset.single_task="$SINGLE_TASK" \
   --display_data=true \
@@ -46,3 +46,4 @@ python -m lerobot.record \
   --policy.path="tinjyuu/my_smolvla-lerobot-policy-1"
 
 
+  # --robot.cameras='{ overhead: {type: opencv, index_or_path: 0, width: 1920, height: 1080, fps: 30}, side: {type: opencv, index_or_path: 1, width: 1920, height: 1080, fps: 30}}' \
