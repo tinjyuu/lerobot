@@ -43,3 +43,4 @@ echo "Robot: port=$ROBOT_PORT id=$ROBOT_ID | Policy: $POLICY_PATH (fps=$POLICY_F
 python /Users/sy/dev/lerobot/mcp/server.py
 
 
+
