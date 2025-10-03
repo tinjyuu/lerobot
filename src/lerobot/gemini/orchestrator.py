@@ -14,11 +14,19 @@ PLAN_PROMPT = (
     Use only these steps with minimal arguments:
       - detect: {label}
       - approach: {label}
-      - grasp: {label}
+      - set_gripper: {value}
+      - set: {name, value}
+      - move: {x, y, theta, seconds}
       - place: {label, target}
       - arm_home: {}
+      - play_motion: {name, episode}
+    Constraints:
+      - Prefer 'set_gripper' or 'set' to directly control servos; avoid 'grasp'.
+      - Only close gripper after approach has confirmed proximity.
+      - Prefer 'play_motion' if user mentions a known command name.
+      - 'move' uses base velocities in m/s (x,y) and deg/s (theta) for a duration.
     Return JSON only, no extra text. Example:
-    {"plan": [{"step":"detect","label":"donut"}, {"step":"approach","label":"donut"}, {"step":"grasp","label":"donut"}]}
+    {"plan": [{"step":"detect","label":"donut"}, {"step":"approach","label":"donut"}, {"step":"set_gripper","value":85}]}
     """
 ).strip()
 

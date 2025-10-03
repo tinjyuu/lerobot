@@ -9,7 +9,7 @@ from lerobot.utils.control_utils import init_keyboard_listener
 from lerobot.utils.utils import log_say
 from lerobot.utils.visualization_utils import _init_rerun
 
-NUM_EPISODES = 3
+NUM_EPISODES = 1
 FPS = 30
 EPISODE_TIME_SEC = 30
 RESET_TIME_SEC = 10
@@ -31,7 +31,7 @@ dataset_features = {**action_features, **obs_features}
 
 # Create the dataset
 dataset = LeRobotDataset.create(
-    repo_id="<hf_username>/<dataset_repo_id>",
+    repo_id="tinjyuu/lekiwi_record_2",
     fps=FPS,
     features=dataset_features,
     robot_type=robot.name,
