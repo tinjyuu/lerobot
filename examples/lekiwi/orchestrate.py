@@ -4,13 +4,56 @@ import os
 from pathlib import Path
 
 import cv2  # noqa: F401 (kept for potential future overlay saving)
+import numpy as np
 from datasets import load_dataset  # type: ignore
 from google import genai  # type: ignore
 from google.genai import types as genai_types  # type: ignore
+from PIL import Image
 
 from lerobot.gemini import GeminiVisionClient, GeminiVisionConfig
 from lerobot.robots.lekiwi import LeKiwiClient, LeKiwiClientConfig
 from lerobot.utils.robot_utils import busy_wait
+
+# Alignment thresholds to switch from alignment → pickup
+ALIGN_THRESH_X = 0.03
+ALIGN_THRESH_Y = 0.05
+
+
+def _draw_detections_bgr(image_bgr: np.ndarray, detections):
+    img = image_bgr.copy()
+    h, w = img.shape[:2]
+    for det in detections or []:
+        try:
+            y, x = det["point"]  # [y, x] in 0..1000
+            label = str(det.get("label", ""))
+            px = int((x / 1000.0) * w)
+            py = int((y / 1000.0) * h)
+
+            # dot
+            cv2.circle(img, (px, py), 10, (255, 255, 255), -1)
+            cv2.circle(img, (px, py), 8, (255, 0, 0), -1)
+
+            # label with normalized coords
+            label_text = f"{label} ({x/1000.0:.2f},{y/1000.0:.2f})"
+            (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            box_w = tw + 18
+            box_h = th + 12
+            box_x = px + 12
+            box_y = max(py - box_h // 2, 0)
+            cv2.rectangle(img, (box_x, box_y), (box_x + box_w, box_y + box_h), (255, 0, 0), -1)
+            cv2.rectangle(img, (box_x, box_y), (box_x + box_w, box_y + box_h), (255, 255, 255), 2)
+            cv2.putText(
+                img,
+                label_text,
+                (box_x + 9, box_y + box_h - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2,
+            )
+        except Exception:
+            continue
+    return img
 
 
 def detect(vision: GeminiVisionClient, img, label: str):
@@ -20,7 +63,8 @@ def detect(vision: GeminiVisionClient, img, label: str):
     for d in res.parsed:
         if d.get("label", "").lower().find(label.lower()) != -1:
             return d
-    return res.parsed[0]
+    # strict: if no label match, treat as not detected
+    return None
 
 
 """
@@ -159,73 +203,69 @@ def cmd_arm_home(robot: LeKiwiClient, fps: int):
 def cmd_rotate(robot: LeKiwiClient, args: dict, fps: int):
     theta = float(args.get("theta", 20.0))
     seconds = float(args.get("seconds", 1.0))
-    print(f"[Run] rotate theta={theta} deg/s for {seconds}s")
+    # Enforce sensible minimums to ensure visible motion
+    if abs(theta) < 10.0:
+        theta = 10.0 if theta >= 0.0 else -10.0
+    if seconds < 0.5:
+        seconds = 0.5
+    print(f"[Run] rotate theta={theta} deg/s for {seconds}s (clamped)")
     rotate(robot, theta, seconds, fps=fps)
 
 
-def cmd_find(robot: LeKiwiClient, vision: GeminiVisionClient, args: dict, fps: int):
-    label = args.get("label", "")
-    seconds = float(args.get("seconds", 5.0))
-    theta = float(args.get("theta", 20.0))
-    # 1) if already visible, do nothing
-    obs = robot.get_observation()
-    img = obs.get("front")
-    first = detect(vision, img, label)
-    if first is not None:
-        print(f"[Run] find: '{label}' already visible; skip rotate")
-        return
-    # 2) otherwise, rotate while checking visibility
-    steps = max(int(seconds * fps), 1)
-    arm_hold = {k: float(v) for k, v in obs.items() if k.endswith(".pos") and k.startswith("arm_")}
-    print(f"[Run] find rotating theta={theta} deg/s up to {seconds}s to find '{label}'")
-    for _ in range(steps):
-        robot.send_action({**arm_hold, "x.vel": 0.0, "y.vel": 0.0, "theta.vel": float(theta)})
-        busy_wait(1.0 / fps)
-        obs = robot.get_observation()
-        img = obs.get("front")
-        if detect(vision, img, label) is not None:
-            break
-    robot.send_action({**arm_hold, "x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0})
+# align is intentionally removed to keep responsibilities in the planner
 
 
 def cmd_pickup(robot: LeKiwiClient, args: dict, fps: int):
-    # Default to registered command name 'pickup' unless a specific name is provided
-    name = args.get("name", "pickup")
-    path = MOTION_COMMANDS.get(name)
-    if not path:
-        print(f"[Error] pickup: unknown command name '{name}'")
-        return
-    print(f"[Run] pickup via play_motion name={name} episode={path}")
+    # Hardcoded episode path (local, single source of truth)
+    path = (
+        "/Users/sy/.cache/huggingface/lerobot/tinjyuu/lekiwi_record_2/data/chunk-000/episode_000000.parquet"
+    )
+    print(f"[Run] pickup via play_motion episode={path}")
     play_motion(robot, path, fps_fallback=fps)
 
 
 COMMANDS = {
     "move": lambda robot, vision, args, fps: cmd_move(robot, args, fps),
     "set": lambda robot, vision, args, fps: cmd_set(robot, args),
-    # play_motion is internal; expose 'pickup' to the planner
-    "pickup": lambda robot, vision, args, fps: cmd_pickup(robot, args, fps),
+    # play_motion is internal; expose 'pickup' to the planner (no args)
+    "pickup": lambda robot, vision, args, fps: cmd_pickup(robot, {}, fps),
     "play_motion": lambda robot, vision, args, fps: cmd_play_motion(robot, args, fps),
     "arm_home": lambda robot, vision, args, fps: cmd_arm_home(robot, fps),
     "detect": lambda robot, vision, args, fps: detect(
         vision, robot.get_observation().get("front"), args.get("label", "")
     ),
     "rotate": lambda robot, vision, args, fps: cmd_rotate(robot, args, fps),
-    "find": lambda robot, vision, args, fps: cmd_find(robot, vision, args, fps),
 }
 
 
-def build_function_call_prompt(task: str) -> str:
+def build_align_prompt(task: str) -> str:
     return (
-        "You are a robotics task planner. Generate a sequence of function calls to achieve the user's instruction.\n"
+        "You are a robotics planner for the ALIGNMENT PHASE only.\n"
+        "Goal: Center the target object at (x=0.50, y=0.50) in the image.\n"
         "Available functions (use exactly these names and positional args order):\n"
+        "- detect(label: str)\n"
+        "- rotate(theta: float, seconds: float)\n"
         "- move(x: float, y: float, theta: float, seconds: float)\n"
         "- set(name: str, value: float)\n"
-        "- pickup(name: str optional)\n"
-        "- rotate(theta: float, seconds: float)\n"
-        "- find(label: str, seconds: float optional, theta: float optional)\n"
         "- arm_home()\n"
-        "- detect(label: str)\n"
-        'Rules: Return ONLY a JSON array. Each item is {"function": <name>, "args": [..]}. No prose.\n'
+        'Return ONLY a JSON array. Each item is {"function": <name>, "args": [..]}. No prose.\n'
+        "Policy:\n"
+        "1) Always call detect(label) first. If None, rotate() to search and detect again.\n"
+        "2) If visible, plan small move()/rotate() to reduce errors to center: x_error=x-0.50, y_error=y-0.50.\n"
+        "3) Do NOT call pickup() in this phase.\n"
+        f"Instruction: {task}\n"
+    )
+
+
+def build_pickup_prompt(task: str) -> str:
+    return (
+        "You are a robotics planner for the PICKUP PHASE only.\n"
+        "Assume the target is already centered at (x=0.50, y=0.50).\n"
+        "Available functions (use exactly these names and positional args order):\n"
+        "- pickup()\n"
+        "- set(name: str, value: float)\n"
+        'Return ONLY a JSON array. Each item is {"function": <name>, "args": [..]}. No prose.\n'
+        "Policy: Prefer calling pickup() directly.\n"
         f"Instruction: {task}\n"
     )
 
@@ -272,18 +312,84 @@ def main():
         return
 
     # Agent loop: plan -> function-call execute -> eval -> replan (always loop)
+    prev_iter_info: dict | None = None
     iters = max(1, args.max_iters)
     for i in range(iters):
-        prompt = build_function_call_prompt(args.task)
+        # Get current observation and camera image for planning
+        import time
+
+        obs = robot.get_observation()
+        front_img_raw = obs.get("front")
+
+        # Convert to PIL Image for Gemini
+        if front_img_raw is not None and isinstance(front_img_raw, np.ndarray):
+            front_img = Image.fromarray(front_img_raw)
+        else:
+            front_img = front_img_raw
+
+        # Overlay Gemini detections on planning image and save ONLY overlay
+        if front_img is not None:
+            # run pointing on current view
+            det_res = vision.point_items_multi({"front": np.array(front_img)}, parse_json=True)[0]
+            img_rgb = np.array(front_img)
+            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+            overlaid = _draw_detections_bgr(img_bgr, det_res.parsed)
+            plan_img_dir = Path("outputs/plan_images")
+            plan_img_dir.mkdir(parents=True, exist_ok=True)
+            plan_img_path = plan_img_dir / f"plan_iter_{i+1:03d}_overlay.jpg"
+            cv2.imwrite(str(plan_img_path), overlaid)
+            print(f"[Plan] Saved overlay to {plan_img_path}")
+
+        # Phase selection: alignment until centered; then pickup phase
+        # Use detections we just computed (avoid extra API call)
+        parsed = det_res.parsed if front_img is not None else []
+        target_label = str(args.task)
+        picked = None
+        for d in parsed or []:
+            if str(d.get("label", "")).lower().find(target_label.lower()) != -1:
+                picked = d
+                break
+        visible = picked is not None
+        centered = False
+        x0 = y0 = None
+        if visible:
+            pyx = picked.get("point", [500, 500])
+            y0 = pyx[0] / 1000.0
+            x0 = pyx[1] / 1000.0
+            centered = (abs(x0 - 0.50) < ALIGN_THRESH_X) and (abs(y0 - 0.50) < ALIGN_THRESH_Y)
+        print(
+            f"[Plan] Current detect visible={visible} x={x0 if x0 is not None else 'NA'} y={y0 if y0 is not None else 'NA'} centered={centered}"
+        )
+
+        base_prompt = build_pickup_prompt(args.task) if centered else build_align_prompt(args.task)
+        obs_json = {
+            "label": target_label,
+            "visible": bool(visible),
+            "x": x0,
+            "y": y0,
+            "thresholds": {"x": ALIGN_THRESH_X, "y": ALIGN_THRESH_Y},
+        }
+        prompt = base_prompt + "\nCurrentObservation: " + json.dumps(obs_json)
+        if prev_iter_info is not None:
+            prompt += "\nPreviousIteration: " + json.dumps(prev_iter_info)
+        phase = "pickup" if centered else "align"
+        print(f"[Plan] Phase={phase} | Generating plan for iteration {i+1}...")
+
+        t0 = time.perf_counter()
+        # Send compact JSON/text prompt only (no image) for faster LLM latency
+        contents = [prompt]
         resp = client.models.generate_content(
             model="gemini-robotics-er-1.5-preview",
-            contents=[prompt],
+            contents=contents,
             config=genai_types.GenerateContentConfig(
                 temperature=0.2,
                 response_mime_type="application/json",
             ),
         )
+        t1 = time.perf_counter()
+        print(f"[Plan] LLM responded in {t1 - t0:.2f}s")
         text = (resp.text or "").strip()
+        print(f"[Plan] Raw response: {text[:200]}")
         if not text:
             calls = []
         elif text.startswith("[") and text.endswith("]"):
@@ -325,11 +431,99 @@ def main():
                 COMMANDS["arm_home"](robot, vision, {}, args.fps)
             elif fn == "detect" and len(args_list) >= 1:
                 COMMANDS["detect"](robot, vision, {"label": args_list[0]}, args.fps)
+            elif fn == "rotate" and len(args_list) >= 2:
+                COMMANDS["rotate"](robot, vision, {"theta": args_list[0], "seconds": args_list[1]}, args.fps)
+            elif fn == "align" and len(args_list) >= 1:
+                COMMANDS["align"](robot, vision, {"label": args_list[0]}, args.fps)
             else:
                 print(f"[Skip] unknown or malformed function call: {call}")
 
-        _ = robot.get_observation()
-        print(f"[Eval] iteration {i+1} complete. Replanning..." if i + 1 < iters else "[Done]")
+        # After executing actions, compute detection again and store delta for next iteration
+        obs_after = robot.get_observation()
+        front_after = obs_after.get("front")
+        after_x = after_y = None
+        after_visible = False
+        if front_after is not None:
+            det_after = vision.point_items_multi({"front": front_after}, parse_json=True)[0]
+            picked_after = None
+            for d in det_after.parsed or []:
+                if str(d.get("label", "")).lower().find(target_label.lower()) != -1:
+                    picked_after = d
+                    break
+            if picked_after is not None:
+                pyx2 = picked_after.get("point", [500, 500])
+                after_y = pyx2[0] / 1000.0
+                after_x = pyx2[1] / 1000.0
+                after_visible = True
+        print(
+            f"[Iter] before x={x0 if x0 is not None else 'NA'}, y={y0 if y0 is not None else 'NA'} -> "
+            f"after x={after_x if after_x is not None else 'NA'}, y={after_y if after_y is not None else 'NA'}"
+        )
+        prev_iter_info = {
+            "before": obs_json,
+            "after": {"visible": after_visible, "x": after_x, "y": after_y},
+            "executed": calls,
+        }
+
+        # Evaluate: ask Gemini if the task is complete based on current observation
+        obs = robot.get_observation()
+        arm_pos = {k: float(v) for k, v in obs.items() if k.startswith("arm_") and k.endswith(".pos")}
+        front_img_raw = obs.get("front")
+
+        if front_img_raw is not None:
+            # Convert numpy array to PIL Image for Gemini API
+            if isinstance(front_img_raw, np.ndarray):
+                front_img = Image.fromarray(front_img_raw)
+            else:
+                front_img = front_img_raw
+
+            # Save evaluation image for debugging
+            eval_img_dir = Path("outputs/eval_images")
+            eval_img_dir.mkdir(parents=True, exist_ok=True)
+            eval_img_path = eval_img_dir / f"eval_iter_{i+1:03d}.jpg"
+            front_img.save(eval_img_path)
+            print(f"[Eval] Saved image to {eval_img_path}")
+
+            eval_prompt = (
+                f"Task: {args.task}\n"
+                f"Current arm state: {arm_pos}\n"
+                "Based on the current camera view, evaluate:\n"
+                '1. Is the task complete? (respond with JSON: {"complete": true/false, "reason": "...", "distance_assessment": "..."})\n'
+                "2. If not complete:\n"
+                "   - Is the target object visible and centered in the view?\n"
+                "   - Estimate the distance: too far (>15cm), good (~10cm), or too close (<5cm)?\n"
+                "   - What adjustment is needed? (e.g., move forward, move back, align again, rotate)\n"
+                "3. For pickup tasks: the object should be centered and approximately 10cm away (appearing in lower-center of the frame).\n"
+            )
+            print(f"[Eval] Asking Gemini to evaluate iteration {i+1}...")
+            t_eval_0 = time.perf_counter()
+            eval_resp = client.models.generate_content(
+                model="gemini-robotics-er-1.5-preview",
+                contents=[front_img, eval_prompt],
+                config=genai_types.GenerateContentConfig(
+                    temperature=0.2,
+                    response_mime_type="application/json",
+                ),
+            )
+            t_eval_1 = time.perf_counter()
+            eval_text = (eval_resp.text or "").strip()
+            print(f"[Eval] Gemini responded in {t_eval_1 - t_eval_0:.2f}s: {eval_text}")
+
+            # Parse evaluation result
+            try:
+                eval_result = json.loads(eval_text) if eval_text else {}
+                if eval_result.get("complete", False):
+                    print(f"[Eval] Task complete: {eval_result.get('reason', 'No reason given')}")
+                    break
+                else:
+                    print(f"[Eval] Task incomplete: {eval_result.get('reason', 'Continuing...')}")
+            except json.JSONDecodeError:
+                print("[Eval] Could not parse evaluation response, continuing...")
+        else:
+            print("[Eval] No front camera image available for evaluation, continuing...")
+
+        if i + 1 < iters:
+            print(f"[Eval] Replanning for iteration {i+2}...")
 
 
 if __name__ == "__main__":
