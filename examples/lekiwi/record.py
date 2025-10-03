@@ -15,10 +15,10 @@ EPISODE_TIME_SEC = 30
 RESET_TIME_SEC = 10
 TASK_DESCRIPTION = "My task description"
 
-# Create the robot and teleoperator configurations
-robot_config = LeKiwiClientConfig(remote_ip="172.18.134.136", id="lekiwi")
-leader_arm_config = SO100LeaderConfig(port="/dev/tty.usbmodem585A0077581", id="my_awesome_leader_arm")
-keyboard_config = KeyboardTeleopConfig()
+# Create the robot and teleoperator configurations (match teleoperate.py)
+robot_config = LeKiwiClientConfig(remote_ip="rbl.local", id="my_kiwi")
+leader_arm_config = SO100LeaderConfig(port="/dev/tty.usbmodem5A7A0178081", id="my_awesome_leader_arm1")
+keyboard_config = KeyboardTeleopConfig(id="my_laptop_keyboard")
 
 robot = LeKiwiClient(robot_config)
 leader_arm = SO100Leader(leader_arm_config)
