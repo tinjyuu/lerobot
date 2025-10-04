@@ -110,9 +110,9 @@ ALIGN_THRESH_Y = 0.05
 
 # Pickup readiness window (normalized 0..1)
 # Loosened per spec: x in [0.40, 0.60], y in [0.50, 0.70]
-PICKUP_X_MIN = 0.45
-PICKUP_X_MAX = 0.55
-PICKUP_Y_MIN = 0.55
+PICKUP_X_MIN = 0.55
+PICKUP_X_MAX = 0.60
+PICKUP_Y_MIN = 0.60
 PICKUP_Y_MAX = 0.65
 
 
