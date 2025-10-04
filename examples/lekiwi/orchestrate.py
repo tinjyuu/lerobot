@@ -110,10 +110,10 @@ ALIGN_THRESH_Y = 0.05
 
 # Pickup readiness window (normalized 0..1)
 # Loosened per spec: x in [0.40, 0.60], y in [0.50, 0.70]
-PICKUP_X_MIN = 0.40
-PICKUP_X_MAX = 0.60
-PICKUP_Y_MIN = 0.50
-PICKUP_Y_MAX = 0.70
+PICKUP_X_MIN = 0.45
+PICKUP_X_MAX = 0.55
+PICKUP_Y_MIN = 0.55
+PICKUP_Y_MAX = 0.65
 
 
 def _draw_detections_bgr(image_bgr: np.ndarray, detections):
@@ -232,15 +232,37 @@ def arm_home(robot: LeKiwiClient, fps: int = 10, steps: int = 10):
         busy_wait(1.0 / fps)
 
 
-# Simple base move using velocities for a duration
-def move(robot: LeKiwiClient, x: float, y: float, theta: float, seconds: float, fps: int = 10):
+def _move_robot_vel(
+    robot: LeKiwiClient, forward: float, left: float, theta: float, seconds: float, fps: int = 10
+):
+    """Low-level move in robot frame.
+
+    - forward: + = forward, - = backward
+    - left:    + = left,    - = right
+    - theta:   + = CCW,     - = CW (deg/s)
+    """
     steps = max(int(seconds * fps), 1)
     obs = robot.get_observation()
     arm_hold = {k: float(v) for k, v in obs.items() if k.endswith(".pos") and k.startswith("arm_")}
     for _ in range(steps):
-        robot.send_action({**arm_hold, "x.vel": float(x), "y.vel": float(y), "theta.vel": float(theta)})
+        robot.send_action(
+            {**arm_hold, "x.vel": float(forward), "y.vel": float(left), "theta.vel": float(theta)}
+        )
         busy_wait(1.0 / fps)
     robot.send_action({**arm_hold, "x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0})
+
+
+# Image-frame move using screen/image axes for convenience
+def move(robot: LeKiwiClient, x_img: float, y_img: float, theta: float, seconds: float, fps: int = 10):
+    """High-level move in image frame.
+
+    - x_img: + = move right,  - = move left  (image X axis)
+    - y_img: + = move forward, - = move back (image Y/depth heuristic)
+    - theta: + = CCW,          - = CW (deg/s)
+    """
+    forward = float(y_img)
+    left = float(-x_img)  # right (+x_img) means left velocity negative
+    _move_robot_vel(robot, forward, left, theta, seconds, fps=fps)
 
 
 # Rotate in place at theta (deg/s) for a duration
@@ -401,6 +423,10 @@ def build_align_prompt(task: str) -> str:
         "1) A detections list is provided in CurrentObservation.detections as [{label,x,y},...].\n"
         "   Choose ONE target whose label best matches the instruction (e.g., 'green block').\n"
         f"2) Plan small move()/rotate() steps to bring the target into x∈[{PICKUP_X_MIN:.2f},{PICKUP_X_MAX:.2f}] and y∈[{PICKUP_Y_MIN:.2f},{PICKUP_Y_MAX:.2f}].\n"
+        "   Heuristics (image-frame to move mapping):\n"
+        "     - Detection interpretation: smaller y means farther; larger y means nearer.\n"
+        "     - x command: + moves RIGHT, - moves LEFT (smaller detected x ⇒ plan x>0; larger x ⇒ plan x<0).\n"
+        "     - y command: + moves FORWARD, - moves BACKWARD (smaller detected y ⇒ plan y>0; larger y ⇒ plan y<0).\n"
         "   Rotation convention: theta>0 = counter-clockwise, theta<0 = clockwise.\n"
         f'3) If the chosen target is already within x∈[{PICKUP_X_MIN:.2f},{PICKUP_X_MAX:.2f}] and y∈[{PICKUP_Y_MIN:.2f},{PICKUP_Y_MAX:.2f}], return EXACTLY [{{"function":"stop","args":[]}}] and nothing else.\n'
         f"Instruction: {task}\n"
@@ -417,6 +443,15 @@ def main():
     # --d_wrist removed: orchestration uses front camera only
     parser.add_argument("--log_plan", action="store_true")
     parser.add_argument("--max_iters", type=int, default=50)
+    parser.add_argument(
+        "--only_move",
+        type=str,
+        default=None,
+        help=(
+            "Debug: run a single move() and exit. Format: x,y[,theta[,seconds]] "
+            "(e.g., --only_move 0.05,0 or --only_move (0.05,0,15,1.5))"
+        ),
+    )
     # Run only pickup motion (no Gemini/planner). Useful for quick testing.
     parser.add_argument(
         "--run_pickup_only",
@@ -434,6 +469,21 @@ def main():
         print("[RunCmd] pickup-only -> executing pre-recorded pickup motion")
         cmd_pickup(robot, {}, args.fps)
         return
+    # Fast path: move-only for debugging
+    if args.only_move:
+        raw = args.only_move.strip()
+        if raw.startswith("(") and raw.endswith(")"):
+            raw = raw[1:-1]
+        parts = [p.strip() for p in raw.split(",") if p.strip() != ""]
+        vals = [float(p) for p in parts]
+        # Defaults: theta=0.0, seconds=1.0 if not provided
+        x = vals[0] if len(vals) > 0 else 0.0
+        y = vals[1] if len(vals) > 1 else 0.0
+        theta = vals[2] if len(vals) > 2 else 0.0
+        seconds = vals[3] if len(vals) > 3 else 1.0
+        print(f"[OnlyMove] x={x} y={y} theta={theta} seconds={seconds} fps={args.fps}")
+        move(robot, x, y, theta, seconds, fps=args.fps)
+        return
     vision = GeminiVisionClient(GeminiVisionConfig())
     client = genai.Client()  # function-calling planner (initialized for parity; unused in this step)
     weave_mod = _init_weave()  # keep W&B/Weave available for future steps
@@ -445,6 +495,7 @@ def main():
     print("[GenAI] client initialized")
 
     # Loop: detect -> plan with detections -> execute -> stop on explicit stop()
+    conversation_history = ""
     for i in range(max(1, args.max_iters)):
         obs = robot.get_observation()
         front_img = obs.get("front") if isinstance(obs.get("front"), np.ndarray) else None
@@ -482,7 +533,8 @@ def main():
             "target_window": {"x": [PICKUP_X_MIN, PICKUP_X_MAX], "y": [PICKUP_Y_MIN, PICKUP_Y_MAX]},
             "target_center": {"x": 0.50, "y": 0.60},
         }
-        prompt = base_prompt + "\nCurrentObservation: " + json.dumps(obs_json)
+        history_block = ("History:\n" + conversation_history + "\n") if conversation_history else ""
+        prompt = base_prompt + "\n" + history_block + "CurrentObservation: " + json.dumps(obs_json)
         print(f"[Gemini][Text][Input] len={len(prompt)} preview={json.dumps(prompt)}")
         resp = client.models.generate_content(
             model="gemini-robotics-er-1.5-preview",
@@ -490,10 +542,14 @@ def main():
             config=genai_types.GenerateContentConfig(
                 temperature=0.2,
                 response_mime_type="application/json",
+                thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
             ),
         )
         text = (resp.text or "").strip()
         print(f"[Plan] Raw response: {text}")
+        conversation_history += (
+            f"i{i+1} input prompt\n" + prompt + "\n--\n" + f"i{i+1} ai response\n" + text + "\n--\n"
+        )
         if text.startswith("[") and text.endswith("]"):
             calls = json.loads(text)
         elif text.startswith("{") and text.endswith("}"):
