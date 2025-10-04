@@ -181,6 +181,35 @@ def _image_stats(img: np.ndarray) -> dict:
         return {"shape": None, "dtype": None, "min": None, "max": None}
 
 
+def _choose_target_from_detections(simple: list[dict], task: str) -> dict | None:
+    """Pick one detection matching the task label best.
+
+    Returns {"label": str, "x": float, "y": float, "visible": bool} or None.
+    """
+    if not simple:
+        return None
+    target = (task or "").lower().strip()
+    if not target:
+        d = simple[0]
+        return {"label": d.get("label", ""), "x": d.get("x"), "y": d.get("y"), "visible": True}
+    toks = set(target.split())
+    best = None
+    best_score = -1
+    for d in simple:
+        dl = str(d.get("label", "")).lower()
+        dtoks = set(dl.split())
+        score = 0
+        if target in dl or dl in target:
+            score += 2
+        score += len(toks & dtoks)
+        if score > best_score:
+            best = d
+            best_score = score
+    if best is None:
+        return None
+    return {"label": best.get("label", ""), "x": best.get("x"), "y": best.get("y"), "visible": True}
+
+
 def _voicevox_say(
     text: str, speaker: int = 1, host: str = "http://localhost:50021", out_dir: str = "outputs/voice"
 ) -> Path:
@@ -528,14 +557,17 @@ def main():
     print("[GenAI] client initialized")
 
     # Loop: detect -> plan with detections -> execute -> stop on explicit stop()
-    conversation_history = ""
+    # conversation_history removed (no dialog history in prompt)
+    last_before = None
+    last_executed = None
+    last_after = None
     for i in range(max(1, args.max_iters)):
         obs = robot.get_observation()
         front_img = obs.get("front") if isinstance(obs.get("front"), np.ndarray) else None
         if front_img is None:
             print("[Detect] No front camera image available")
             break
-        print(f"[Gemini][Vision][Input] front_stats={json.dumps(_image_stats(front_img))}")
+        # print(f"[Gemini][Vision][Input] front_stats={json.dumps(_image_stats(front_img))}")
         det_front = vision.point_items_multi({"front": front_img}, parse_json=True)[0]
         simple = _extract_simple_detections(det_front.parsed)
         print("[Detect][Front]", json.dumps(simple, ensure_ascii=False))
@@ -559,16 +591,31 @@ def main():
             except Exception as e:
                 print(f"[W&B] log failed: {e}")
 
-        # Orchestration with simple detections
+        # Build previous-iteration summary (before/executed/after) for planner
         base_prompt = build_align_prompt(args.task)
+        prev_summary = None
+        if i > 0:
+            prev_summary = {
+                "before": last_before,
+                "executed": last_executed,
+                "after": last_after,
+            }
         obs_json = {
             "detections": simple,
             "target_window": {"x": [PICKUP_X_MIN, PICKUP_X_MAX], "y": [PICKUP_Y_MIN, PICKUP_Y_MAX]},
             "target_center": {"x": 0.50, "y": 0.60},
         }
-        history_block = ("History:\n" + conversation_history + "\n") if conversation_history else ""
-        prompt = base_prompt + "\n" + history_block + "CurrentObservation: " + json.dumps(obs_json)
-        print(f"[Gemini][Text][Input] len={len(prompt)} preview={json.dumps(prompt)}")
+        if prev_summary is not None:
+            prompt = (
+                base_prompt
+                + "\nPreviousIterationSummary: "
+                + json.dumps(prev_summary, ensure_ascii=False)
+                + "\nCurrentObservation: "
+                + json.dumps(obs_json, ensure_ascii=False)
+            )
+        else:
+            prompt = base_prompt + "\nCurrentObservation: " + json.dumps(obs_json, ensure_ascii=False)
+        print(f"[Gemini][Text][Input] {prompt}")
         resp = client.models.generate_content(
             model="gemini-robotics-er-1.5-preview",
             contents=[prompt],
@@ -580,9 +627,6 @@ def main():
         )
         text = (resp.text or "").strip()
         print(f"[Plan] Raw response: {text}")
-        conversation_history += (
-            f"i{i+1} input prompt\n" + prompt + "\n--\n" + f"i{i+1} ai response\n" + text + "\n--\n"
-        )
         if text.startswith("[") and text.endswith("]"):
             calls = json.loads(text)
         elif text.startswith("{") and text.endswith("}"):
@@ -606,9 +650,11 @@ def main():
                         pass
 
         stop_received = False
+        last_executed = []
         for call in calls:
             fn = (call.get("function") or "").strip()
             args_list = call.get("args", [])
+            last_executed.append({"function": fn, "args": args_list, "reason_ja": call.get("reason_ja")})
             if fn == "pickup":
                 reason = call.get("reason_ja")
                 print("[Plan] pickup received; executing pickup motion and exiting")
@@ -629,6 +675,21 @@ def main():
 
         if stop_received:
             break
+
+        # Record before/after for next iteration summary
+        # before: choose the target from current detections
+        chosen = _choose_target_from_detections(simple, args.task)
+        last_before = chosen or {"label": None, "x": None, "y": None, "visible": False}
+        # after: compute fresh detection of the same label if possible
+        obs_after = robot.get_observation()
+        front_after = obs_after.get("front") if isinstance(obs_after.get("front"), np.ndarray) else None
+        last_after = {"x": None, "y": None, "visible": False}
+        if front_after is not None:
+            det_after = vision.point_items_multi({"front": front_after}, parse_json=True)[0]
+            simple_after = _extract_simple_detections(det_after.parsed)
+            cand = _choose_target_from_detections(simple_after, args.task)
+            if cand is not None:
+                last_after = {"x": cand.get("x"), "y": cand.get("y"), "visible": True}
     return
 
     # Agent loop: plan -> function-call execute -> eval -> replan (always loop)
