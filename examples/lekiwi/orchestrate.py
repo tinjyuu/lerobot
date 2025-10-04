@@ -417,7 +417,7 @@ def build_align_prompt(task: str) -> str:
         "Available functions (use exactly these names and positional args order):\n"
         "- rotate(theta: float, seconds: float)\n"
         "- move(x: float, y: float, theta: float, seconds: float)\n"
-        "- stop()\n"
+        "- pickup()\n"
         'Return ONLY a JSON array. Each item is {"function": <name>, "args": [..]}. No prose.\n'
         "Policy:\n"
         "1) A detections list is provided in CurrentObservation.detections as [{label,x,y},...].\n"
@@ -428,7 +428,7 @@ def build_align_prompt(task: str) -> str:
         "     - x command: + moves LEFT, - moves RIGHT (smaller detected x ⇒ plan x<0; larger x ⇒ plan x>0).\n"
         "     - y command: + moves FORWARD, - moves BACKWARD (smaller detected y ⇒ plan y>0; larger y ⇒ plan y<0).\n"
         "   Rotation convention: theta>0 = counter-clockwise, theta<0 = clockwise.\n"
-        f'3) If the chosen target is already within x∈[{PICKUP_X_MIN:.2f},{PICKUP_X_MAX:.2f}] and y∈[{PICKUP_Y_MIN:.2f},{PICKUP_Y_MAX:.2f}], return EXACTLY [{{"function":"stop","args":[]}}] and nothing else.\n'
+        f'3) If the chosen target is already within x∈[{PICKUP_X_MIN:.2f},{PICKUP_X_MAX:.2f}] and y∈[{PICKUP_Y_MIN:.2f},{PICKUP_Y_MAX:.2f}], return EXACTLY [{{"function":"pickup","args":[]}}] and nothing else.\n'
         f"Instruction: {task}\n"
     )
 
@@ -564,8 +564,9 @@ def main():
         for call in calls:
             fn = (call.get("function") or "").strip()
             args_list = call.get("args", [])
-            if fn == "stop":
-                print("[Plan] stop received; exiting loop")
+            if fn == "pickup":
+                print("[Plan] pickup received; executing pickup motion and exiting")
+                COMMANDS["pickup"](robot, vision, {}, args.fps)
                 stop_received = True
                 break
             if fn == "move" and len(args_list) >= 4:
@@ -581,8 +582,6 @@ def main():
                 print(f"[Skip] {fn}")
 
         if stop_received:
-            print("[Plan] stop received; executing pickup motion")
-            cmd_pickup(robot, {}, args.fps)
             break
     return
 
