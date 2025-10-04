@@ -8,12 +8,14 @@ import cv2  # noqa: F401 (kept for potential future overlay saving)
 import numpy as np
 from datasets import load_dataset  # type: ignore
 from google import genai  # type: ignore
-from google.genai import types as genai_types  # type: ignore
-from PIL import Image
 
 from lerobot.gemini import GeminiVisionClient, GeminiVisionConfig
 from lerobot.robots.lekiwi import LeKiwiClient, LeKiwiClientConfig
 from lerobot.utils.robot_utils import busy_wait
+
+# from google.genai import types as genai_types  # type: ignore
+# from PIL import Image
+
 
 # W&B trace table (lazy init)
 _WB_TRACE_TABLE = None
@@ -450,10 +452,45 @@ def main():
         cmd_pickup(robot, {}, args.fps)
         return
     vision = GeminiVisionClient(GeminiVisionConfig())
-    client = genai.Client()  # function-calling planner
-    weave_mod = _init_weave()
+    client = genai.Client()  # function-calling planner (initialized for parity; unused in this step)
+    weave_mod = _init_weave()  # keep W&B/Weave available for future steps
     wandb_mod = _init_wandb()
     # (removed) run_once: using function-calling dispatcher below
+
+    # Mark initializations (avoid unused warnings; useful diagnostics)
+    print(f"[Weave] initialized={weave_mod is not None}")
+    print("[GenAI] client initialized")
+
+    # First: run one front-camera detection, log results, save overlay, then exit
+    obs = robot.get_observation()
+    front_img = obs.get("front") if isinstance(obs.get("front"), np.ndarray) else None
+    if front_img is None:
+        print("[Detect] No front camera image available")
+        return
+    print(f"[Gemini][Vision][Input] front_stats={json.dumps(_image_stats(front_img))}")
+    det_front = vision.point_items_multi({"front": front_img}, parse_json=True)[0]
+    simple = _extract_simple_detections(det_front.parsed)
+    print("[Detect][Front]", json.dumps(simple, ensure_ascii=False))
+    # Save overlay
+    plan_img_dir = Path("outputs/plan_images")
+    plan_img_dir.mkdir(parents=True, exist_ok=True)
+    overlay_path = plan_img_dir / "front_detect_overlay.jpg"
+    img_bgr = cv2.cvtColor(front_img, cv2.COLOR_RGB2BGR)
+    overlaid = _draw_detections_bgr(img_bgr, det_front.parsed)
+    ok = cv2.imwrite(str(overlay_path), overlaid)
+    print(f"[Detect] Saved overlay to {overlay_path} ok={ok}")
+    # Log to W&B if available
+    if wandb_mod is not None:
+        try:
+            wandb_mod.log(
+                {
+                    "front_detect": wandb_mod.Image(str(overlay_path)),
+                    "front_detections": simple,
+                }
+            )
+        except Exception as e:
+            print(f"[W&B] log failed: {e}")
+    return
 
     # Agent loop: plan -> function-call execute -> eval -> replan (always loop)
 
