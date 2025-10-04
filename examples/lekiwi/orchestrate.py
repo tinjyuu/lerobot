@@ -522,7 +522,7 @@ def build_align_prompt(task: str) -> str:
         "     - For y axis: if detected_y < center_y → '対象がピックアップポジションより奥にあるため、前へ{abs(step_y):.3f}移動する' ;\n"
         "                   if detected_y > center_y → '対象がピックアップポジションより手前にあるため、後ろへ{abs(step_y):.3f}移動する'.\n"
         "     - If both axes move, join clauses with '、' and end with '移動する'. Avoid using 奥/手前 or mixing opposite terms.\n"
-        "   If the target cannot be found in detections, do NOT move forward/backward; use rotate with POSITIVE theta (left/CCW) to search, e.g., rotate(30.0,1.0).\n"
+        "   If the target cannot be found in detections, do NOT move forward/backward; use rotate with POSITIVE theta (left/CCW) to search, e.g., rotate(20.0,1.0).\n"
         "   Rotation convention: theta>0 = counter-clockwise, theta<0 = clockwise.\n"
         f'3) If the chosen target is already within x∈[{PICKUP_X_MIN:.2f},{PICKUP_X_MAX:.2f}] and y∈[{PICKUP_Y_MIN:.2f},{PICKUP_Y_MAX:.2f}], return EXACTLY [{{"function":"pickup","args":[], "reason_ja":"<短い日本語の理由>。ターゲットをピックアップする"}}] and nothing else.\n'
         "   When returning pickup(), reason_ja MUST contain a concise Japanese reason the model infers (not fixed text),\n"
