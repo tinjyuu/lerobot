@@ -2,10 +2,13 @@ import argparse
 import importlib.util
 import json
 import os
+import subprocess
+import time
 from pathlib import Path
 
 import cv2  # noqa: F401 (kept for potential future overlay saving)
 import numpy as np
+import requests  # type: ignore
 from datasets import load_dataset  # type: ignore
 from google import genai  # type: ignore
 from google.genai import types as genai_types  # type: ignore
@@ -176,6 +179,33 @@ def _image_stats(img: np.ndarray) -> dict:
         }
     except Exception:
         return {"shape": None, "dtype": None, "min": None, "max": None}
+
+
+def _voicevox_say(
+    text: str, speaker: int = 1, host: str = "http://localhost:50021", out_dir: str = "outputs/voice"
+) -> Path:
+    """Synthesize and play speech via VOICEVOX local server.
+
+    - Requires VOICEVOX engine at host (default http://localhost:50021)
+    - Saves wav and attempts to play with macOS afplay (non-blocking tolerated)
+    """
+    out_dir_path = Path(out_dir)
+    out_dir_path.mkdir(parents=True, exist_ok=True)
+    # Create audio query
+    q = requests.post(f"{host}/audio_query", params={"text": text, "speaker": speaker})
+    q.raise_for_status()
+    # Synthesis
+    syn = requests.post(f"{host}/synthesis", params={"speaker": speaker}, data=q.text)
+    syn.raise_for_status()
+    wav_path = out_dir_path / f"voice_{int(time.time()*1000)}.wav"
+    with wav_path.open("wb") as f:
+        f.write(syn.content)
+    # Try to play (best-effort)
+    try:
+        subprocess.Popen(["afplay", str(wav_path)])
+    except Exception:
+        pass
+    return wav_path
 
 
 def detect(vision: GeminiVisionClient, img, label: str):
@@ -418,15 +448,16 @@ def build_align_prompt(task: str) -> str:
         "- rotate(theta: float, seconds: float)\n"
         "- move(x: float, y: float, theta: float, seconds: float)\n"
         "- pickup()\n"
-        'Return ONLY a JSON array. Each item is {"function": <name>, "args": [..]}. No prose.\n'
+        'Return ONLY a JSON array. Each item is {"function": <name>, "args": [..], "reason_ja": "<短い日本語の理由>"}. No prose.\n'
         "Policy:\n"
         "1) A detections list is provided in CurrentObservation.detections as [{label,x,y},...].\n"
         "   Choose ONE target whose label best matches the instruction (e.g., 'green block').\n"
         f"2) Plan small move()/rotate() steps to bring the target into x∈[{PICKUP_X_MIN:.2f},{PICKUP_X_MAX:.2f}] and y∈[{PICKUP_Y_MIN:.2f},{PICKUP_Y_MAX:.2f}].\n"
         "   Heuristics (image-frame to move mapping):\n"
         "     - Detection interpretation: smaller y means farther; larger y means nearer.\n"
-        "     - x command: + moves LEFT, - moves RIGHT (smaller detected x ⇒ plan x<0; larger x ⇒ plan x>0).\n"
+        "     - x command: + moves RIGHT, - moves LEFT (smaller detected x ⇒ plan x>0; larger x ⇒ plan x<0).\n"
         "     - y command: + moves FORWARD, - moves BACKWARD (smaller detected y ⇒ plan y>0; larger y ⇒ plan y<0).\n"
+        "   If the target cannot be found in detections, do NOT move forward/backward; use rotate(theta,seconds) only to search.\n"
         "   Rotation convention: theta>0 = counter-clockwise, theta<0 = clockwise.\n"
         f'3) If the chosen target is already within x∈[{PICKUP_X_MIN:.2f},{PICKUP_X_MAX:.2f}] and y∈[{PICKUP_Y_MIN:.2f},{PICKUP_Y_MAX:.2f}], return EXACTLY [{{"function":"pickup","args":[]}}] and nothing else.\n'
         f"Instruction: {task}\n"
@@ -559,12 +590,32 @@ def main():
 
         if args.log_plan:
             print("[Plan]", json.dumps(calls, ensure_ascii=False))
+        # Print Japanese reasons and speak via VOICEVOX if available
+        for c in calls:
+            if isinstance(c, dict) and "reason_ja" in c:
+                reason = c.get("reason_ja")
+                if isinstance(reason, str) and reason.strip():
+                    # 口調: 「◯◯なのだ」
+                    styled = reason.rstrip("。") + "なのだ"
+                    print(f"[Plan][理由] {styled}")
+                    try:
+                        _voicevox_say(styled)
+                    except Exception:
+                        pass
 
         stop_received = False
         for call in calls:
             fn = (call.get("function") or "").strip()
             args_list = call.get("args", [])
             if fn == "pickup":
+                reason = call.get("reason_ja")
+                if isinstance(reason, str) and reason.strip():
+                    styled = reason.rstrip("。") + "なのだ"
+                    print(f"[Plan][理由] {styled}")
+                    try:
+                        _voicevox_say(styled)
+                    except Exception:
+                        pass
                 print("[Plan] pickup received; executing pickup motion and exiting")
                 COMMANDS["pickup"](robot, vision, {}, args.fps)
                 stop_received = True
