@@ -8,12 +8,12 @@ import cv2  # noqa: F401 (kept for potential future overlay saving)
 import numpy as np
 from datasets import load_dataset  # type: ignore
 from google import genai  # type: ignore
+from google.genai import types as genai_types  # type: ignore
 
 from lerobot.gemini import GeminiVisionClient, GeminiVisionConfig
 from lerobot.robots.lekiwi import LeKiwiClient, LeKiwiClientConfig
 from lerobot.utils.robot_utils import busy_wait
 
-# from google.genai import types as genai_types  # type: ignore
 # from PIL import Image
 
 
@@ -109,10 +109,11 @@ ALIGN_THRESH_X = 0.03
 ALIGN_THRESH_Y = 0.05
 
 # Pickup readiness window (normalized 0..1)
-PICKUP_X_MIN = 0.45
-PICKUP_X_MAX = 0.55
-PICKUP_Y_MIN = 0.55
-PICKUP_Y_MAX = 0.65
+# Loosened per spec: x in [0.40, 0.60], y in [0.50, 0.70]
+PICKUP_X_MIN = 0.40
+PICKUP_X_MAX = 0.60
+PICKUP_Y_MIN = 0.50
+PICKUP_Y_MAX = 0.70
 
 
 def _draw_detections_bgr(image_bgr: np.ndarray, detections):
@@ -390,36 +391,18 @@ COMMANDS = {
 def build_align_prompt(task: str) -> str:
     return (
         "You are a robotics planner for the ALIGNMENT PHASE only.\n"
-        "Goal: Center the target object at (x=0.50, y=0.60) in the image.\n"
+        f"Goal: Move/rotate so the chosen target enters the window x∈[{PICKUP_X_MIN:.2f},{PICKUP_X_MAX:.2f}], y∈[{PICKUP_Y_MIN:.2f},{PICKUP_Y_MAX:.2f}].\n"
         "Available functions (use exactly these names and positional args order):\n"
-        "- detect(label: str)\n"
         "- rotate(theta: float, seconds: float)\n"
         "- move(x: float, y: float, theta: float, seconds: float)\n"
-        "- set(name: str, value: float)\n"
-        "- arm_home()\n"
+        "- stop()\n"
         'Return ONLY a JSON array. Each item is {"function": <name>, "args": [..]}. No prose.\n'
         "Policy:\n"
-        "1) Extract a SHORT noun-phrase label from the instruction (e.g., 'blue cube').\n"
-        "   Use that exact label in detect(label). No verbs or extra words.\n"
-        "   Reuse the SAME label across all steps.\n"
-        "2) Always call detect(label) first. If None, rotate() to search and detect again.\n"
-        "3) If visible, plan small move()/rotate() to reduce errors to center: x_error=x-0.50, y_error=y-0.60.\n"
-        "   Rotation convention: theta>0 = counter-clockwise (turn left), theta<0 = clockwise (turn right).\n"
-        "   If rotate_hint == 'flip_sign', flip the sign of theta in the next rotate step.\n"
-        "4) Do NOT call pickup() in this phase.\n"
-        f"Instruction: {task}\n"
-    )
-
-
-def build_pickup_prompt(task: str) -> str:
-    return (
-        "You are a robotics planner for the PICKUP PHASE only.\n"
-        "Assume the target is already centered at (x=0.50, y=0.50).\n"
-        "Available functions (use exactly these names and positional args order):\n"
-        "- pickup()\n"
-        "- set(name: str, value: float)\n"
-        'Return ONLY a JSON array. Each item is {"function": <name>, "args": [..]}. No prose.\n'
-        "Policy: Prefer calling pickup() directly.\n"
+        "1) A detections list is provided in CurrentObservation.detections as [{label,x,y},...].\n"
+        "   Choose ONE target whose label best matches the instruction (e.g., 'green block').\n"
+        f"2) Plan small move()/rotate() steps to bring the target into x∈[{PICKUP_X_MIN:.2f},{PICKUP_X_MAX:.2f}] and y∈[{PICKUP_Y_MIN:.2f},{PICKUP_Y_MAX:.2f}].\n"
+        "   Rotation convention: theta>0 = counter-clockwise, theta<0 = clockwise.\n"
+        f'3) If the chosen target is already within x∈[{PICKUP_X_MIN:.2f},{PICKUP_X_MAX:.2f}] and y∈[{PICKUP_Y_MIN:.2f},{PICKUP_Y_MAX:.2f}], return EXACTLY [{{"function":"stop","args":[]}}] and nothing else.\n'
         f"Instruction: {task}\n"
     )
 
@@ -461,35 +444,90 @@ def main():
     print(f"[Weave] initialized={weave_mod is not None}")
     print("[GenAI] client initialized")
 
-    # First: run one front-camera detection, log results, save overlay, then exit
-    obs = robot.get_observation()
-    front_img = obs.get("front") if isinstance(obs.get("front"), np.ndarray) else None
-    if front_img is None:
-        print("[Detect] No front camera image available")
-        return
-    print(f"[Gemini][Vision][Input] front_stats={json.dumps(_image_stats(front_img))}")
-    det_front = vision.point_items_multi({"front": front_img}, parse_json=True)[0]
-    simple = _extract_simple_detections(det_front.parsed)
-    print("[Detect][Front]", json.dumps(simple, ensure_ascii=False))
-    # Save overlay
-    plan_img_dir = Path("outputs/plan_images")
-    plan_img_dir.mkdir(parents=True, exist_ok=True)
-    overlay_path = plan_img_dir / "front_detect_overlay.jpg"
-    img_bgr = cv2.cvtColor(front_img, cv2.COLOR_RGB2BGR)
-    overlaid = _draw_detections_bgr(img_bgr, det_front.parsed)
-    ok = cv2.imwrite(str(overlay_path), overlaid)
-    print(f"[Detect] Saved overlay to {overlay_path} ok={ok}")
-    # Log to W&B if available
-    if wandb_mod is not None:
-        try:
-            wandb_mod.log(
-                {
-                    "front_detect": wandb_mod.Image(str(overlay_path)),
-                    "front_detections": simple,
-                }
-            )
-        except Exception as e:
-            print(f"[W&B] log failed: {e}")
+    # Loop: detect -> plan with detections -> execute -> stop on explicit stop()
+    for i in range(max(1, args.max_iters)):
+        obs = robot.get_observation()
+        front_img = obs.get("front") if isinstance(obs.get("front"), np.ndarray) else None
+        if front_img is None:
+            print("[Detect] No front camera image available")
+            break
+        print(f"[Gemini][Vision][Input] front_stats={json.dumps(_image_stats(front_img))}")
+        det_front = vision.point_items_multi({"front": front_img}, parse_json=True)[0]
+        simple = _extract_simple_detections(det_front.parsed)
+        print("[Detect][Front]", json.dumps(simple, ensure_ascii=False))
+
+        # Save overlay per iteration
+        plan_img_dir = Path("outputs/plan_images")
+        plan_img_dir.mkdir(parents=True, exist_ok=True)
+        overlay_path = plan_img_dir / f"plan_iter_{i+1:03d}_overlay.jpg"
+        img_bgr = cv2.cvtColor(front_img, cv2.COLOR_RGB2BGR)
+        overlaid = _draw_detections_bgr(img_bgr, det_front.parsed)
+        ok = cv2.imwrite(str(overlay_path), overlaid)
+        print(f"[Detect] Saved overlay to {overlay_path} ok={ok}")
+        if wandb_mod is not None:
+            try:
+                wandb_mod.log(
+                    {
+                        "front_detect": wandb_mod.Image(str(overlay_path)),
+                        "front_detections": simple,
+                    }
+                )
+            except Exception as e:
+                print(f"[W&B] log failed: {e}")
+
+        # Orchestration with simple detections
+        base_prompt = build_align_prompt(args.task)
+        obs_json = {
+            "detections": simple,
+            "target_window": {"x": [PICKUP_X_MIN, PICKUP_X_MAX], "y": [PICKUP_Y_MIN, PICKUP_Y_MAX]},
+            "target_center": {"x": 0.50, "y": 0.60},
+        }
+        prompt = base_prompt + "\nCurrentObservation: " + json.dumps(obs_json)
+        print(f"[Gemini][Text][Input] len={len(prompt)} preview={json.dumps(prompt)}")
+        resp = client.models.generate_content(
+            model="gemini-robotics-er-1.5-preview",
+            contents=[prompt],
+            config=genai_types.GenerateContentConfig(
+                temperature=0.2,
+                response_mime_type="application/json",
+            ),
+        )
+        text = (resp.text or "").strip()
+        print(f"[Plan] Raw response: {text}")
+        if text.startswith("[") and text.endswith("]"):
+            calls = json.loads(text)
+        elif text.startswith("{") and text.endswith("}"):
+            calls = [json.loads(text)]
+        else:
+            calls = []
+
+        if args.log_plan:
+            print("[Plan]", json.dumps(calls, ensure_ascii=False))
+
+        stop_received = False
+        for call in calls:
+            fn = (call.get("function") or "").strip()
+            args_list = call.get("args", [])
+            if fn == "stop":
+                print("[Plan] stop received; exiting loop")
+                stop_received = True
+                break
+            if fn == "move" and len(args_list) >= 4:
+                COMMANDS["move"](
+                    robot,
+                    vision,
+                    {"x": args_list[0], "y": args_list[1], "theta": args_list[2], "seconds": args_list[3]},
+                    args.fps,
+                )
+            elif fn == "rotate" and len(args_list) >= 2:
+                COMMANDS["rotate"](robot, vision, {"theta": args_list[0], "seconds": args_list[1]}, args.fps)
+            else:
+                print(f"[Skip] {fn}")
+
+        if stop_received:
+            print("[Plan] stop received; executing pickup motion")
+            cmd_pickup(robot, {}, args.fps)
+            break
     return
 
     # Agent loop: plan -> function-call execute -> eval -> replan (always loop)
