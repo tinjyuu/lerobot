@@ -459,7 +459,9 @@ def build_align_prompt(task: str) -> str:
         "     - y command: + moves FORWARD, - moves BACKWARD (smaller detected y ⇒ plan y>0; larger y ⇒ plan y<0).\n"
         "   If the target cannot be found in detections, do NOT move forward/backward; use rotate(theta,seconds) only to search.\n"
         "   Rotation convention: theta>0 = counter-clockwise, theta<0 = clockwise.\n"
-        f'3) If the chosen target is already within x∈[{PICKUP_X_MIN:.2f},{PICKUP_X_MAX:.2f}] and y∈[{PICKUP_Y_MIN:.2f},{PICKUP_Y_MAX:.2f}], return EXACTLY [{{"function":"pickup","args":[]}}] and nothing else.\n'
+        f'3) If the chosen target is already within x∈[{PICKUP_X_MIN:.2f},{PICKUP_X_MAX:.2f}] and y∈[{PICKUP_Y_MIN:.2f},{PICKUP_Y_MAX:.2f}], return EXACTLY [{{"function":"pickup","args":[], "reason_ja":"<短い日本語の理由>。ターゲットをピックアップする"}}] and nothing else.\n'
+        "   When returning pickup(), reason_ja MUST contain a concise Japanese reason the model infers (not fixed text),\n"
+        "   and explicitly include the phrase 'ターゲットをピックアップする'.\n"
         f"Instruction: {task}\n"
     )
 
@@ -609,13 +611,6 @@ def main():
             args_list = call.get("args", [])
             if fn == "pickup":
                 reason = call.get("reason_ja")
-                if isinstance(reason, str) and reason.strip():
-                    styled = reason.rstrip("。") + "なのだ"
-                    print(f"[Plan][理由] {styled}")
-                    try:
-                        _voicevox_say(styled)
-                    except Exception:
-                        pass
                 print("[Plan] pickup received; executing pickup motion and exiting")
                 COMMANDS["pickup"](robot, vision, {}, args.fps)
                 stop_received = True
