@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -22,6 +23,10 @@ from lerobot.utils.robot_utils import busy_wait
 
 # W&B trace table (lazy init)
 _WB_TRACE_TABLE = None
+
+# VOICEVOX playback singleton
+_VOICE_PLAYBACK_PROC: subprocess.Popen | None = None
+_VOICE_PLAYBACK_LOCK = threading.Lock()
 
 
 def _init_weave():
@@ -231,8 +236,26 @@ def _voicevox_say(
         f.write(syn.content)
     # Try to play (best-effort)
     try:
-        subprocess.Popen(["afplay", str(wav_path)])
+        global _VOICE_PLAYBACK_PROC
+        with _VOICE_PLAYBACK_LOCK:
+            try:
+                if _VOICE_PLAYBACK_PROC is not None and _VOICE_PLAYBACK_PROC.poll() is None:
+                    _VOICE_PLAYBACK_PROC.terminate()
+                    try:
+                        _VOICE_PLAYBACK_PROC.wait(timeout=0.3)
+                    except Exception:
+                        _VOICE_PLAYBACK_PROC.kill()
+            except Exception:
+                # Ignore any errors from terminating previous playback
+                pass
+            try:
+                _VOICE_PLAYBACK_PROC = subprocess.Popen(["afplay", str(wav_path)])
+            except Exception:
+                _VOICE_PLAYBACK_PROC = None
+                # If afplay is unavailable or fails, ignore and continue
+                pass
     except Exception:
+        # Failsafe: do not crash caller due to audio issues
         pass
     return wav_path
 
@@ -490,6 +513,9 @@ def build_align_prompt(task: str) -> str:
         "       (round(v,3) means 0.001 resolution; clip to ±0.02 to keep steps small).\n"
         "     - Use move(x=step_x, y=step_y, theta=0, seconds=1.0) repeatedly; prefer multiple small steps over one large step.\n"
         "     - Note: smaller detected y means farther; larger detected y means nearer.\n"
+        "   reason_ja style (strict):\n"
+        "     - Describe ACTIONS only with directions 右/左/前/後ろ and magnitudes (3 decimals).\n"
+        "     - Example: '右へ0.010、前へ0.005移動する'（avoid 奥/手前; avoid '左にあるため右へ' など原因と逆向きを同時に書く表現）.\n"
         "   If the target cannot be found in detections, do NOT move forward/backward; use rotate(theta,seconds) only to search.\n"
         "   Rotation convention: theta>0 = counter-clockwise, theta<0 = clockwise.\n"
         f'3) If the chosen target is already within x∈[{PICKUP_X_MIN:.2f},{PICKUP_X_MAX:.2f}] and y∈[{PICKUP_Y_MIN:.2f},{PICKUP_Y_MAX:.2f}], return EXACTLY [{{"function":"pickup","args":[], "reason_ja":"<短い日本語の理由>。ターゲットをピックアップする"}}] and nothing else.\n'
