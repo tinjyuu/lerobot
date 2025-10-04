@@ -425,7 +425,7 @@ def build_align_prompt(task: str) -> str:
         f"2) Plan small move()/rotate() steps to bring the target into x∈[{PICKUP_X_MIN:.2f},{PICKUP_X_MAX:.2f}] and y∈[{PICKUP_Y_MIN:.2f},{PICKUP_Y_MAX:.2f}].\n"
         "   Heuristics (image-frame to move mapping):\n"
         "     - Detection interpretation: smaller y means farther; larger y means nearer.\n"
-        "     - x command: + moves RIGHT, - moves LEFT (smaller detected x ⇒ plan x>0; larger x ⇒ plan x<0).\n"
+        "     - x command: + moves LEFT, - moves RIGHT (smaller detected x ⇒ plan x<0; larger x ⇒ plan x>0).\n"
         "     - y command: + moves FORWARD, - moves BACKWARD (smaller detected y ⇒ plan y>0; larger y ⇒ plan y<0).\n"
         "   Rotation convention: theta>0 = counter-clockwise, theta<0 = clockwise.\n"
         f'3) If the chosen target is already within x∈[{PICKUP_X_MIN:.2f},{PICKUP_X_MAX:.2f}] and y∈[{PICKUP_Y_MIN:.2f},{PICKUP_Y_MAX:.2f}], return EXACTLY [{{"function":"stop","args":[]}}] and nothing else.\n'
