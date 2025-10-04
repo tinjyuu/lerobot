@@ -320,7 +320,7 @@ def move(robot: LeKiwiClient, x_img: float, y_img: float, theta: float, seconds:
     - theta: + = CCW,          - = CW (deg/s)
     """
     forward = float(y_img)
-    left = float(-x_img)  # right (+x_img) means left velocity negative
+    left = float(x_img)  # positive x_img moves left, negative moves right
     _move_robot_vel(robot, forward, left, theta, seconds, fps=fps)
 
 
@@ -482,10 +482,14 @@ def build_align_prompt(task: str) -> str:
         "1) A detections list is provided in CurrentObservation.detections as [{label,x,y},...].\n"
         "   Choose ONE target whose label best matches the instruction (e.g., 'green block').\n"
         f"2) Plan small move()/rotate() steps to bring the target into x∈[{PICKUP_X_MIN:.2f},{PICKUP_X_MAX:.2f}] and y∈[{PICKUP_Y_MIN:.2f},{PICKUP_Y_MAX:.2f}].\n"
-        "   Heuristics (image-frame to move mapping):\n"
-        "     - Detection interpretation: smaller y means farther; larger y means nearer.\n"
-        "     - x command: + moves RIGHT, - moves LEFT (smaller detected x ⇒ plan x>0; larger x ⇒ plan x<0).\n"
-        "     - y command: + moves FORWARD, - moves BACKWARD (smaller detected y ⇒ plan y>0; larger y ⇒ plan y<0).\n"
+        "   Movement rules (scaled, micro-adjustments):\n"
+        "     - Define center_x=(target_window.x[0]+target_window.x[1])/2 and center_y=(target_window.y[0]+target_window.y[1])/2.\n"
+        "     - Compute dx = center_x - detected_x and dy = center_y - detected_y.\n"
+        "     - Set step_x = clip(round(dx*0.25, 3), -0.020, 0.020); if abs(step_x)<0.001 then step_x=sign(dx)*0.001.\n"
+        "     - Set step_y = clip(round(dy*0.25, 3), -0.020, 0.020); if abs(step_y)<0.001 then step_y=sign(dy)*0.001.\n"
+        "       (round(v,3) means 0.001 resolution; clip to ±0.02 to keep steps small).\n"
+        "     - Use move(x=step_x, y=step_y, theta=0, seconds=1.0) repeatedly; prefer multiple small steps over one large step.\n"
+        "     - Note: smaller detected y means farther; larger detected y means nearer.\n"
         "   If the target cannot be found in detections, do NOT move forward/backward; use rotate(theta,seconds) only to search.\n"
         "   Rotation convention: theta>0 = counter-clockwise, theta<0 = clockwise.\n"
         f'3) If the chosen target is already within x∈[{PICKUP_X_MIN:.2f},{PICKUP_X_MAX:.2f}] and y∈[{PICKUP_Y_MIN:.2f},{PICKUP_Y_MAX:.2f}], return EXACTLY [{{"function":"pickup","args":[], "reason_ja":"<短い日本語の理由>。ターゲットをピックアップする"}}] and nothing else.\n'
