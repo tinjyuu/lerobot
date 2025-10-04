@@ -23,8 +23,9 @@ def draw_detections(image_bgr: np.ndarray, detections):
             cv2.circle(img, (px, py), 10, (255, 255, 255), -1)
             cv2.circle(img, (px, py), 8, (255, 0, 0), -1)
 
-            # label box (blue with rounded-like effect)
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            # label with normalized coords (x,y)
+            label_text = f"{label} ({x/1000.0:.2f},{y/1000.0:.2f})"
+            (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
             box_w = tw + 18
             box_h = th + 12
             box_x = px + 12
@@ -32,7 +33,13 @@ def draw_detections(image_bgr: np.ndarray, detections):
             cv2.rectangle(img, (box_x, box_y), (box_x + box_w, box_y + box_h), (255, 0, 0), -1)
             cv2.rectangle(img, (box_x, box_y), (box_x + box_w, box_y + box_h), (255, 255, 255), 2)
             cv2.putText(
-                img, label, (box_x + 9, box_y + box_h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
+                img,
+                label_text,
+                (box_x + 9, box_y + box_h - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2,
             )
         except Exception:
             continue
@@ -65,23 +72,25 @@ def main():
     if len(cam_images) == 0:
         raise RuntimeError("No camera images found in observation (expected keys: front, wrist)")
 
-    # Gemini inference
+    # Gemini inference with timing log
     gemini = GeminiVisionClient(GeminiVisionConfig())
-    results = gemini.point_items_multi(cam_images, parse_json=True)
+    import time as _time
 
-    # Save raw and overlay images
+    _t0 = _time.perf_counter()
+    results = gemini.point_items_multi(cam_images, parse_json=True)
+    _t1 = _time.perf_counter()
+    print(f"[Gemini] inference: {_t1 - _t0:.2f}s for {len(cam_images)} views")
+
+    # Save overlay images only
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     for r in results:
         img = cam_images[r.camera]
         img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR) if color_space == "rgb" else img
-        raw_path = out_dir / f"{ts}_{r.camera}_raw.jpg"
-        cv2.imwrite(str(raw_path), img_bgr)
 
         overlaid = draw_detections(img_bgr, r.parsed)
         overlay_path = out_dir / f"{ts}_{r.camera}_overlay.jpg"
         cv2.imwrite(str(overlay_path), overlaid)
 
-        print(f"Saved: {raw_path}")
         print(f"Saved: {overlay_path}")
 
 

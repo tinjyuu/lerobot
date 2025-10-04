@@ -17,7 +17,7 @@ TASK_DESCRIPTION = "My task description"
 
 # Create the robot and teleoperator configurations (match teleoperate.py)
 robot_config = LeKiwiClientConfig(remote_ip="rbl.local", id="my_kiwi")
-leader_arm_config = SO100LeaderConfig(port="/dev/tty.usbmodem5A7A0178081", id="my_awesome_leader_arm1")
+leader_arm_config = SO100LeaderConfig(port="/dev/tty.usbmodem5A7A0178081", id="my_awesome_leader_arm-2")
 keyboard_config = KeyboardTeleopConfig(id="my_laptop_keyboard")
 
 robot = LeKiwiClient(robot_config)
@@ -31,7 +31,7 @@ dataset_features = {**action_features, **obs_features}
 
 # Create the dataset
 dataset = LeRobotDataset.create(
-    repo_id="tinjyuu/lekiwi_record_2",
+    repo_id="tinjyuu/lekiwi_record_5",
     fps=FPS,
     features=dataset_features,
     robot_type=robot.name,
