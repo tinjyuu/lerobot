@@ -1,0 +1,65 @@
+FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+
+SHELL ["/bin/bash", "-lc"]
+
+# Install Miniconda
+ENV CONDA_DIR=/opt/conda
+ENV PATH=$CONDA_DIR/bin:$PATH
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends wget bzip2 && \
+    rm -rf /var/lib/apt/lists/* && \
+    wget -qO /tmp/miniforge.sh https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh && \
+    bash /tmp/miniforge.sh -b -p $CONDA_DIR && \
+    rm /tmp/miniforge.sh && \
+    conda clean -afy
+
+# Create and prepare conda environment per README
+RUN conda create -y -n lerobot python=3.10 && \
+    conda install -y -n lerobot -c conda-forge ffmpeg=7.1.1 && \
+    conda clean -afy
+
+# Auto-activate the environment in interactive shells
+RUN echo ". $CONDA_DIR/etc/profile.d/conda.sh" >> /etc/bash.bashrc && \
+    echo "conda activate lerobot" >> /etc/bash.bashrc
+
+# Ensure non-interactive shells default to the env
+ENV CONDA_DEFAULT_ENV=lerobot
+ENV PATH=$CONDA_DIR/envs/lerobot/bin:$PATH
+ 
+# --- Clone repository and install in editable mode ---
+ARG REPO_URL=https://github.com/huggingface/lerobot.git
+ARG REPO_REF=main
+
+# Install git for cloning
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git && \
+    rm -rf /var/lib/apt/lists/*
+
+# Clone the repository (override REPO_URL/REPO_REF at build time if needed)
+RUN git clone --depth 1 --branch ${REPO_REF} ${REPO_URL} /opt/lerobot
+
+WORKDIR /opt/lerobot
+
+# Use conda env and install package in editable mode and with smolvla extras
+RUN . $CONDA_DIR/etc/profile.d/conda.sh && \
+    conda activate lerobot && \
+    pip install -U pip && \
+    pip install -e . && \
+    pip install -e ".[smolvla]"
+
+# Enable SSH (key-based auth)
+ARG SSH_PUBLIC_KEY=""
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends openssh-server && \
+    rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /var/run/sshd
+RUN sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config && \
+    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config && \
+    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
+RUN if [ -n "$SSH_PUBLIC_KEY" ]; then echo "$SSH_PUBLIC_KEY" >> /root/.ssh/authorized_keys; fi && \
+    { [ ! -f /root/.ssh/authorized_keys ] || chmod 600 /root/.ssh/authorized_keys; }
+
+EXPOSE 22
+CMD ["/usr/sbin/sshd","-D"]
